@@ -1,0 +1,78 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Xcode
+## User settings
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+
+## Build products
+build/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+## Xcode workspace shared/other
+*.xccheckout
+*.xcscmblueprint
+
+## Obsolete Xcode
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+.swiftpm/
+
+# CocoaPods
+# Uncomment the next line if you do NOT check Pods into source control
+Pods/
+
+# Carthage
+Carthage/Build/
+Carthage/Checkouts
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Provisioning / signing (never commit secrets)
+*.mobileprovision
+*.p12
+*.cer
+*.certSigningRequest
+
+# Injection / hot reload
+iOSInjectionProject/
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Environment / secrets
+.env
+.env.local
+*.xcconfig.local
+Secrets.plist
+
+# Claude Code (local settings)
+.claude/settings.local.json
