@@ -9,9 +9,13 @@ import SwiftUI
 
 @main
 struct FrigateApp: App {
+    @State private var appModel = AppModel()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(appModel)
+                .task { await appModel.bootstrap() }
         }
     }
 }
