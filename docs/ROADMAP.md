@@ -34,16 +34,17 @@ _Milestone: project builds and runs on a device; docs establish the plan._
 ## P1 - Connect & authenticate
 Foundation everything else builds on.
 - [x] Shared API client (base URL, JSON decoding, cookie/JWT handling, error handling) - C1: `FrigateClient` actor + `Endpoint`/`APIError`/`CredentialProviding`/`InsecureTrustDelegate`; `FrigateTests` green (10 tests)
-- [ ] Server setup screen: enter Frigate URL + connection test
-- [ ] Handle http/https and self-signed certs (explicit trust)
-- [ ] Detect auth mode - support both auth-enabled and auth-disabled Frigate
-- [ ] Login screen (username / password)
-- [ ] `POST /api/login`, capture JWT cookie
-- [ ] Store token/credential in Keychain (shared App Group access group)
-- [ ] Silent 401 re-login + retry; honor refreshed `Set-Cookie`
-- [ ] Persist server config; auto-connect on relaunch
+- [x] Server setup screen: enter Frigate URL + connection test - C2: `ServerSetupView`/`ServerSetupModel`, `AppModel` state machine, `RootView` switch, `MainPlaceholderView`
+- [x] Handle http/https and self-signed certs (explicit trust) - C2: `ServerURL` normalization (default https), http:// auto-fallback, "Allow insecure" toggle wired to `InsecureTrustDelegate`
+- [x] Detect auth mode - support both auth-enabled and auth-disabled Frigate - C3: probe status decides (200 -> connected, 401 -> needsAuth); auth-off connects with no login
+- [x] Login screen (username / password) - C3: `LoginView`/`LoginModel`, `RootView` shows it on `.needsAuth`, host label for context
+- [x] `POST /api/login`, capture JWT cookie - C3: `AppModel.submitLogin` logs in on the reused client (cookie jar captures `frigate_token`), then re-probes to `.connected`
+- [x] Store token/credential in Keychain (shared App Group access group) - C4: `Frigate.entitlements` (App Group + keychain sharing), `CredentialStoring`/`KeychainCredentialStore`; password + token-mirror round-trip against `group.com.sagarp.Frigate`
+- [x] Silent 401 re-login + retry; honor refreshed `Set-Cookie` - C5: `KeychainCredentialProvider` wired into the client; `401` re-runs `/api/login` with the stored password and retries once; refreshed `frigate_token` mirrored to the store
+- [x] Persist server config; auto-connect on relaunch - C6: `ServerConfig`/`ServerConfigStore` (App-Group defaults); `AppModel.bootstrap()` re-logs-in for a fresh cookie on launch; `logout()` clears everything
 
 _Milestone: add your Frigate, log in (or connect with auth off), stay logged in across restarts._
+_Status: implemented and unit-tested (51 tests); end-to-end against a real Frigate server still to be run on-device._
 
 ## P2 - Camera grid
 - [ ] App shell / navigation (Cameras, Events)

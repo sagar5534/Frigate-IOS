@@ -46,3 +46,16 @@ final class ResponseSequence: @unchecked Sendable {
         return responses.removeFirst()
     }
 }
+
+/// Thread-safe call counter for handlers that must vary their response by attempt number.
+final class Counter: @unchecked Sendable {
+    private var value = 0
+    private let lock = NSLock()
+
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+}

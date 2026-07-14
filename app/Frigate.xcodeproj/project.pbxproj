@@ -6,6 +6,16 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		1BB5C40000000000000000B2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1BB5C30030054FCF001C6B21 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1BB5C30730054FCF001C6B21;
+			remoteInfo = Frigate;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		1BB5C30830054FCF001C6B21 /* Frigate.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Frigate.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1BB5C40000000000000000A2 /* FrigateTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FrigateTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -109,16 +119,6 @@
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
-
-/* Begin PBXContainerItemProxy section */
-		1BB5C40000000000000000B2 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 1BB5C30030054FCF001C6B21 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 1BB5C30730054FCF001C6B21;
-			remoteInfo = Frigate;
-		};
-/* End PBXContainerItemProxy section */
 
 /* Begin PBXProject section */
 		1BB5C30030054FCF001C6B21 /* Project object */ = {
@@ -321,6 +321,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Frigate/Frigate.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = LL6476HKHT;
@@ -367,6 +368,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Frigate/Frigate.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = LL6476HKHT;

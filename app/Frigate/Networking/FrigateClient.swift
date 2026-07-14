@@ -9,18 +9,25 @@ actor FrigateClient {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let credentials: CredentialProviding?
+    // Mirrors the (re)issued `frigate_token` into the shared store so the NSE's snapshot fetch keeps
+    // working (P5); nil when there's nothing to persist to.
+    private let credentialStore: CredentialStoring?
     // Retained so the delegate outlives the client; the session holds only a weak reference.
     private let trustDelegate: InsecureTrustDelegate?
+
+    static let tokenCookieName = "frigate_token"
 
     init(
         baseURL: URL,
         allowInsecure: Bool = false,
         credentials: CredentialProviding? = nil,
+        credentialStore: CredentialStoring? = nil,
         session: URLSession? = nil,
         decoder: JSONDecoder = JSONDecoder()
     ) {
         self.baseURL = baseURL
         self.credentials = credentials
+        self.credentialStore = credentialStore
         self.decoder = decoder
 
         if let session {
@@ -104,9 +111,11 @@ actor FrigateClient {
 
         switch http.statusCode {
         case 200...299:
+            await persistRefreshedToken(from: http)
             return (data, http)
         case 401:
-            if allowRetry, let credentials {
+            // Never re-auth the login request itself - that would recurse forever on a bad password.
+            if allowRetry, endpoint.path != "login", let credentials {
                 try await credentials.reauthenticate(self)
                 return try await send(endpoint, allowRetry: false)
             }
@@ -116,6 +125,19 @@ actor FrigateClient {
         default:
             throw APIError.http(status: http.statusCode, body: data)
         }
+    }
+
+    /// The server sends a `frigate_token` `Set-Cookie` on login and on refresh (within
+    /// `refresh_time`). Whenever we see one, mirror it into the shared store so the NSE stays current.
+    /// The session's own cookie jar still handles attaching it to subsequent requests.
+    private func persistRefreshedToken(from response: HTTPURLResponse) async {
+        guard let credentialStore,
+              let url = response.url,
+              let headers = response.allHeaderFields as? [String: String]
+        else { return }
+        let cookies = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+        guard let token = cookies.first(where: { $0.name == Self.tokenCookieName })?.value else { return }
+        try? await credentialStore.saveToken(token)
     }
 }
 

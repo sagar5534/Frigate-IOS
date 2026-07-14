@@ -1,7 +1,7 @@
 import Foundation
 
 /// The single error type every networking call maps into, so UI can exhaustively switch on it.
-enum APIError: Error, Equatable, Sendable {
+nonisolated enum APIError: Error, Equatable, Sendable {
     case invalidURL
     case transport(URLError)
     case unauthorized

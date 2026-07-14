@@ -3,7 +3,7 @@ import Foundation
 /// A declarative description of one Frigate HTTP request. `path` is relative to `<baseURL>/api/`
 /// (e.g. `"config"`, `"login"`). Adding a new API is a matter of adding one builder here plus a
 /// `Codable` model.
-struct Endpoint: Sendable {
+nonisolated struct Endpoint: Sendable {
     var path: String
     var method: HTTPMethod = .get
     var query: [URLQueryItem] = []
@@ -11,7 +11,7 @@ struct Endpoint: Sendable {
     var headers: [String: String] = [:]
 }
 
-extension Endpoint {
+nonisolated extension Endpoint {
     static var config: Endpoint {
         Endpoint(path: "config")
     }

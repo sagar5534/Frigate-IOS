@@ -2,7 +2,7 @@ import Foundation
 
 /// Minimal decodable subset of Frigate's `/api/config` needed for P1. The value type of
 /// `cameras` expands in P2; unknown keys in the payload are ignored.
-struct FrigateConfig: Decodable, Equatable, Sendable {
+nonisolated struct FrigateConfig: Decodable, Equatable, Sendable {
     let auth: AuthInfo
     let cameras: [String: CameraConfig]
 
