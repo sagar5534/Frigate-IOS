@@ -33,7 +33,7 @@ _Milestone: project builds and runs on a device; docs establish the plan._
 
 ## P1 - Connect & authenticate
 Foundation everything else builds on.
-- [ ] Shared API client (base URL, JSON decoding, cookie/JWT handling, error handling)
+- [x] Shared API client (base URL, JSON decoding, cookie/JWT handling, error handling) - C1: `FrigateClient` actor + `Endpoint`/`APIError`/`CredentialProviding`/`InsecureTrustDelegate`; `FrigateTests` green (10 tests)
 - [ ] Server setup screen: enter Frigate URL + connection test
 - [ ] Handle http/https and self-signed certs (explicit trust)
 - [ ] Detect auth mode - support both auth-enabled and auth-disabled Frigate
