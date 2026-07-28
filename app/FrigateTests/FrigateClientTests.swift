@@ -119,6 +119,37 @@ final class FrigateClientTests: XCTestCase {
         }
     }
 
+    func testSnapshotFetchesRawJPEGBytesFromComposedURL() async throws {
+        let jpegBytes = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://nvr.local:8971/api/front_door/latest.jpg?height=300"
+            )
+            return (self.httpResponse(request.url!, 200), jpegBytes)
+        }
+
+        let data = try await makeClient().snapshot(camera: "front_door", height: 300)
+        XCTAssertEqual(data, jpegBytes)
+    }
+
+    func testSnapshotUnauthorizedReauthenticatesThenRetries() async throws {
+        let jpegBytes = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let sequence = ResponseSequence([(401, Data()), (200, jpegBytes)])
+        MockURLProtocol.requestHandler = { request in
+            let (status, body) = sequence.next()
+            return (self.httpResponse(request.url!, status), body)
+        }
+
+        let counter = ReauthCounter()
+        let client = makeClient(credentials: StubCredentials(counter: counter))
+        let data = try await client.snapshot(camera: "front_door")
+
+        XCTAssertEqual(data, jpegBytes)
+        let count = await counter.count
+        XCTAssertEqual(count, 1)
+    }
+
     func testTransportFailureMapsToTransport() async {
         MockURLProtocol.requestHandler = { _ in
             throw URLError(.notConnectedToInternet)

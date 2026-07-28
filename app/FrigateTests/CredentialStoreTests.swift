@@ -30,10 +30,10 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertEqual(try store.password(account: otherAccount), "b")
     }
 
-    func testInMemoryTokenSlotAndClear() throws {
+    func testInMemoryTokenSlotAndClear() async throws {
         let store = InMemoryCredentialStore()
         XCTAssertNil(try store.token())
-        try store.saveToken("jwt-123")
+        try await store.saveToken("jwt-123")
         XCTAssertEqual(try store.token(), "jwt-123")
 
         try store.savePassword("pw", account: account)
@@ -65,12 +65,12 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertNil(try store.password(account: account))
     }
 
-    func testKeychainTokenMirrorSlot() throws {
+    func testKeychainTokenMirrorSlot() async throws {
         let store = keychainStore()
         defer { try? store.clear() }
 
         XCTAssertNil(try store.token())
-        try store.saveToken("jwt-abc")
+        try await store.saveToken("jwt-abc")
         XCTAssertEqual(try store.token(), "jwt-abc")
     }
 

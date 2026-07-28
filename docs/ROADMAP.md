@@ -44,17 +44,25 @@ Foundation everything else builds on.
 - [x] Persist server config; auto-connect on relaunch - C6: `ServerConfig`/`ServerConfigStore` (App-Group defaults); `AppModel.bootstrap()` re-logs-in for a fresh cookie on launch; `logout()` clears everything
 
 _Milestone: add your Frigate, log in (or connect with auth off), stay logged in across restarts._
-_Status: implemented and unit-tested (51 tests); end-to-end against a real Frigate server still to be run on-device._
+_Status: implemented and unit-tested (51 tests); verified end-to-end against a real Frigate server
+(LAN, plain-HTTP auth proxy) in the iPhone 17 simulator. Found and fixed two bugs surfaced only by
+that live run: default ATS silently blocked the plain-HTTP LAN connection (see LEARNINGS.md), and
+the private cookie jar (`HTTPCookieStorage()`) never actually captured the login `Set-Cookie`, so
+every post-login request 401'd (see LEARNINGS.md). Sign-in now works end-to-end._
 
 ## P2 - Camera grid
-- [ ] App shell / navigation (Cameras, Events)
-- [ ] Fetch `/api/config`, parse camera list
-- [ ] Camera grid of snapshot tiles
-- [ ] Auto-refresh snapshots every few seconds
-- [ ] Tap camera to open a larger snapshot / detail view
-- [ ] Minimal Settings: server info, connection status, log out
+- [x] App shell / navigation (Cameras, Events) - `MainTabView` (Cameras/Events/Settings tabs) replaces the P1 `MainPlaceholderView`
+- [x] Fetch `/api/config`, parse camera list - `FrigateConfig.CameraConfig.enabled` + `enabledCameraNames`; verified field shapes against a real server (frigate.sagarp.ca)
+- [x] Camera grid of snapshot tiles - `CameraGridView`/`CameraGridModel`, `GET /api/{camera}/latest.jpg?height=N`
+- [x] Auto-refresh snapshots every few seconds - `CameraGridModel.startAutoRefresh()` (5s loop, cancelled on disappear)
+- [x] Tap camera to open a larger snapshot / detail view - `CameraDetailView`/`CameraDetailModel` (720p, own refresh loop)
+- [x] Minimal Settings: server info, connection status, log out - `SettingsView`
 
 _Milestone: see all your cameras, updating._
+_Status: implemented and unit-tested (64 tests); verified real `/api/config` and snapshot shapes
+against a live server via curl. End-to-end tap-through (login -> grid rendering) on-device/simulator
+still needs a human pass - no UI automation was available in this session (see DECISIONS.md/session
+notes if that becomes a recurring need)._
 
 ## P3 - Events timeline
 - [ ] Fetch event/review list with thumbnails
