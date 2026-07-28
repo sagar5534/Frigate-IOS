@@ -3,6 +3,7 @@ import SwiftUI
 struct ReviewDetailView: View {
     let client: FrigateClient
     @State private var model: ReviewDetailModel
+    @State private var showingClip = false
 
     init(client: FrigateClient, segment: ReviewSegment, onUpdate: @escaping (ReviewSegment) -> Void) {
         self.client = client
@@ -34,6 +35,16 @@ struct ReviewDetailView: View {
                 }
 
                 Button {
+                    showingClip = true
+                } label: {
+                    Label("Play Clip", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                // A still-open segment has no fixed end time to build a clip range from.
+                .disabled(model.segment.isInProgress)
+
+                Button {
                     Task { await model.toggleReviewed() }
                 } label: {
                     HStack {
@@ -58,6 +69,14 @@ struct ReviewDetailView: View {
         }
         .navigationTitle(model.segment.objectSummary)
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $showingClip) {
+            ClipPlayerView(
+                client: client,
+                camera: model.segment.camera,
+                start: model.segment.startTime,
+                end: model.segment.endTime ?? Date().timeIntervalSince1970
+            )
+        }
     }
 
     private static let durationFormatter: DateComponentsFormatter = {
