@@ -80,4 +80,16 @@ final class EndpointTests: XCTestCase {
         XCTAssertEqual(endpoint.path, "vod/front_door/start/100.0/end/200.0/master.m3u8")
         XCTAssertNil(endpoint.basePath)
     }
+
+    func testSetReviewedEndpoint() throws {
+        let endpoint = try Endpoint.setReviewed(id: "abc123", reviewed: true)
+        XCTAssertEqual(endpoint.path, "reviews/viewed")
+        XCTAssertEqual(endpoint.method, .post)
+        XCTAssertEqual(endpoint.headers["Content-Type"], "application/json")
+
+        let body = try XCTUnwrap(endpoint.body)
+        let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        XCTAssertEqual(json?["ids"] as? [String], ["abc123"])
+        XCTAssertEqual(json?["reviewed"] as? Bool, true)
+    }
 }

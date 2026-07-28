@@ -207,6 +207,19 @@ final class FrigateClientTests: XCTestCase {
         XCTAssertTrue(cookies.contains { $0.name == "frigate_token" && $0.value == "abc123" })
     }
 
+    func testSetReviewedComposesURLAndMethod() async throws {
+        // Body encoding (ids/reviewed shape) is covered at the Endpoint level in
+        // EndpointTests.testSetReviewedEndpoint - inspecting `httpBody` through MockURLProtocol
+        // isn't reliable once URLSession dispatches the request (it can move to a body stream).
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://nvr.local:8971/api/reviews/viewed")
+            XCTAssertEqual(request.httpMethod, "POST")
+            return (self.httpResponse(request.url!, 200), Data())
+        }
+
+        try await makeClient().setReviewed(id: "abc123", reviewed: false)
+    }
+
     func testTransportFailureMapsToTransport() async {
         MockURLProtocol.requestHandler = { _ in
             throw URLError(.notConnectedToInternet)

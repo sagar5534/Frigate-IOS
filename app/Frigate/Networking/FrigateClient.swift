@@ -184,6 +184,10 @@ extension FrigateClient {
         try await data(for: .reviewThumbnail(path: path))
     }
 
+    func setReviewed(id: String, reviewed: Bool) async throws {
+        try await send(.setReviewed(id: id, reviewed: reviewed))
+    }
+
     /// Fully-resolved URL for a base-relative endpoint, for handing to AVPlayer/AVURLAsset.
     func authedURL(for endpoint: Endpoint) -> URL? {
         try? endpointURL(endpoint)

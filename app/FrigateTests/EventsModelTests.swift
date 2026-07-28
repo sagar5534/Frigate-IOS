@@ -99,6 +99,48 @@ final class EventsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testUpdateSegmentReplacesMatchingSegmentInPlace() async throws {
+        let json = Data("[\(segmentJSON(id: "1", startTime: 100))]".utf8)
+        MockURLProtocol.requestHandler = { request in
+            (self.httpResponse(request.url!, 200), json)
+        }
+
+        let model = EventsModel(client: makeClient())
+        await model.load()
+        guard case .loaded(var segments) = model.state else {
+            return XCTFail("expected .loaded after the first load")
+        }
+
+        segments[0].hasBeenReviewed = true
+        model.updateSegment(segments[0])
+
+        guard case .loaded(let updated) = model.state else {
+            return XCTFail("expected .loaded after updateSegment")
+        }
+        XCTAssertEqual(updated.first?.hasBeenReviewed, true)
+    }
+
+    @MainActor
+    func testUpdateSegmentForUnknownIdIsANoOp() async throws {
+        let json = Data("[\(segmentJSON(id: "1", startTime: 100))]".utf8)
+        MockURLProtocol.requestHandler = { request in
+            (self.httpResponse(request.url!, 200), json)
+        }
+
+        let model = EventsModel(client: makeClient())
+        await model.load()
+
+        let unknownJSON = Data(segmentJSON(id: "does-not-exist", startTime: 999).utf8)
+        let unknown = try JSONDecoder().decode(ReviewSegment.self, from: unknownJSON)
+        model.updateSegment(unknown)
+
+        guard case .loaded(let segments) = model.state else {
+            return XCTFail("expected .loaded")
+        }
+        XCTAssertEqual(segments.map(\.id), ["1"])
+    }
+
+    @MainActor
     func testLoadFailureSetsFailedState() async {
         MockURLProtocol.requestHandler = { request in
             (self.httpResponse(request.url!, 500), Data())

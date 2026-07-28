@@ -9,7 +9,7 @@ nonisolated struct ReviewSegment: Decodable, Equatable, Sendable, Identifiable {
     let startTime: Double
     let endTime: Double?
     let severity: Severity
-    let hasBeenReviewed: Bool
+    var hasBeenReviewed: Bool
     let thumbPath: String
     let data: ReviewData
 

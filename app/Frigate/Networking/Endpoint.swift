@@ -87,6 +87,20 @@ nonisolated extension Endpoint {
         Endpoint(path: "review/\(id)/clip.mp4")
     }
 
+    /// Marks one review segment reviewed/unreviewed. Body shape matches the server's
+    /// `ReviewModifyMultipleBody` (a list, even for a single id). Note the path is `reviews`
+    /// (plural) - unlike every other route here, which is singular `review/...`; that's genuinely
+    /// how the server mounts this one, not a typo.
+    static func setReviewed(id: String, reviewed: Bool) throws -> Endpoint {
+        let data = try JSONEncoder().encode(SetReviewedRequest(ids: [id], reviewed: reviewed))
+        return Endpoint(
+            path: "reviews/viewed",
+            method: .post,
+            body: data,
+            headers: ["Content-Type": "application/json"]
+        )
+    }
+
     /// HLS VOD manifest for a segment's camera/time range - the source Frigate recommends for
     /// iOS playback over the progressive `clip.mp4`. Off the server root, not `/api/`.
     static func reviewClipHLS(camera: String, start: Double, end: Double) -> Endpoint {

@@ -42,7 +42,11 @@ struct EventsView: View {
                         ForEach(daySections(for: segments), id: \.day) { section in
                             Section(section.day.formatted(date: .abbreviated, time: .omitted)) {
                                 ForEach(section.segments) { segment in
-                                    ReviewCardView(client: client, segment: segment)
+                                    NavigationLink {
+                                        ReviewDetailView(client: client, segment: segment, onUpdate: model.updateSegment)
+                                    } label: {
+                                        ReviewCardView(client: client, segment: segment)
+                                    }
                                 }
                             }
                         }

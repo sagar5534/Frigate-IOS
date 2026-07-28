@@ -67,7 +67,7 @@ notes if that becomes a recurring need)._
 ## P3 - Events timeline
 - [x] Fetch event/review list with thumbnails - C1: `ReviewSegment` model + `FrigateClient` review/thumbnail/clip-URL support; C2: `EventsView`/`EventsModel`/`ReviewCardView`/`ReviewThumbnail` (day-grouped list, loading/empty/error states, pull-to-refresh)
 - [x] Filters (camera, label, time range) - C3: `EventFilters`/`EventFilterSheet`, `EventsModel.filters` wired into the query via `.task(id:)` with a cancellation guard against stale results
-- [ ] Event detail screen (snapshot)
+- [x] Event detail screen (snapshot) - C4: `ReviewDetailView`/`ReviewDetailModel` (metadata, mark reviewed/unreviewed via `POST /api/reviews/viewed`, propagated back into the list)
 - [ ] Clip playback via AVPlayer (mp4 - the easy video)
 - [ ] Pagination / infinite scroll
 

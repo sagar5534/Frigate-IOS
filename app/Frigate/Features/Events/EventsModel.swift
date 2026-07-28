@@ -46,6 +46,16 @@ final class EventsModel {
             state = .failed
         }
     }
+
+    /// Reflects a change made on the detail screen (e.g. mark reviewed/unreviewed) back into the
+    /// loaded list, so returning to it shows the up-to-date segment without a full reload.
+    func updateSegment(_ updated: ReviewSegment) {
+        guard case .loaded(var segments) = state,
+              let index = segments.firstIndex(where: { $0.id == updated.id })
+        else { return }
+        segments[index] = updated
+        state = .loaded(segments)
+    }
 }
 
 private extension EventsModel.State {
