@@ -65,7 +65,7 @@ still needs a human pass - no UI automation was available in this session (see D
 notes if that becomes a recurring need)._
 
 ## P3 - Events timeline
-- [ ] Fetch event/review list with thumbnails (in progress) - C1: `ReviewSegment` model, `Endpoint`/`FrigateClient` review+thumbnail+clip-URL support landed; list UI (C2) still to come
+- [x] Fetch event/review list with thumbnails - C1: `ReviewSegment` model + `FrigateClient` review/thumbnail/clip-URL support; C2: `EventsView`/`EventsModel`/`ReviewCardView`/`ReviewThumbnail` (day-grouped list, loading/empty/error states, pull-to-refresh)
 - [ ] Filters (camera, label, time range)
 - [ ] Event detail screen (snapshot)
 - [ ] Clip playback via AVPlayer (mp4 - the easy video)

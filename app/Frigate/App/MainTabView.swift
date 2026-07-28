@@ -11,7 +11,7 @@ struct MainTabView: View {
             CameraGridView(client: client, cameraNames: config.enabledCameraNames)
                 .tabItem { Label("Cameras", systemImage: "video") }
 
-            EventsPlaceholderView()
+            EventsView(client: client)
                 .tabItem { Label("Events", systemImage: "list.bullet.rectangle") }
 
             SettingsView(baseURL: appModel.baseURL)

@@ -15,6 +15,8 @@ nonisolated struct ReviewSegment: Decodable, Equatable, Sendable, Identifiable {
 
     enum Severity: String, Sendable, Equatable, CaseIterable {
         case alert, detection
+
+        var displayName: String { rawValue.capitalized }
     }
 
     struct ReviewData: Decodable, Equatable, Sendable {
@@ -62,6 +64,8 @@ nonisolated struct ReviewSegment: Decodable, Equatable, Sendable, Identifiable {
         data = try container.decode(ReviewData.self, forKey: .data)
     }
 
+    var startDate: Date { Date(timeIntervalSince1970: startTime) }
+
     /// Still ongoing - the server hasn't closed out `end_time` yet.
     var isInProgress: Bool { endTime == nil }
 
@@ -84,7 +88,7 @@ nonisolated struct ReviewSegment: Decodable, Equatable, Sendable, Identifiable {
     /// categorized (can happen for audio-only detections).
     var objectSummary: String {
         let unique = Array(Set(data.objects)).sorted()
-        guard !unique.isEmpty else { return severity.rawValue.capitalized }
+        guard !unique.isEmpty else { return severity.displayName }
         return unique.map(\.capitalized).joined(separator: ", ")
     }
 }
