@@ -47,8 +47,20 @@ struct EventsView: View {
                                     } label: {
                                         ReviewCardView(client: client, segment: segment)
                                     }
+                                    .onAppear {
+                                        guard segment.id == segments.last?.id else { return }
+                                        Task { await model.loadMore() }
+                                    }
                                 }
                             }
+                        }
+                        if model.isLoadingMore {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .listRowSeparator(.hidden)
                         }
                     }
                     .listStyle(.plain)

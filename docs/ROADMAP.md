@@ -69,7 +69,7 @@ notes if that becomes a recurring need)._
 - [x] Filters (camera, label, time range) - C3: `EventFilters`/`EventFilterSheet`, `EventsModel.filters` wired into the query via `.task(id:)` with a cancellation guard against stale results
 - [x] Event detail screen (snapshot) - C4: `ReviewDetailView`/`ReviewDetailModel` (metadata, mark reviewed/unreviewed via `POST /api/reviews/viewed`, propagated back into the list)
 - [x] Clip playback via AVPlayer - C5: `ClipPlayerView` plays the HLS VOD manifest (not `clip.mp4` - see DECISIONS.md), cookie-authed via `AVURLAssetHTTPCookiesKey`. **Not yet smoke-tested on a physical device/real server** (no device available this session) - do that before considering P3 fully done.
-- [ ] Pagination / infinite scroll
+- [x] Pagination / infinite scroll - C6: `EventsModel.loadMore()` pages older activity as the last row scrolls into view, moving `before`/`after` together each page, de-duping by id, guarding against filter-change races
 
 _Milestone: browse events and play their clips._
 
