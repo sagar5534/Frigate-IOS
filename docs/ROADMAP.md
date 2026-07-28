@@ -72,6 +72,16 @@ notes if that becomes a recurring need)._
 - [x] Pagination / infinite scroll - C6: `EventsModel.loadMore()` pages older activity as the last row scrolls into view, moving `before`/`after` together each page, de-duping by id, guarding against filter-change races
 
 _Milestone: browse events and play their clips._
+_Status: implemented and unit-tested (105 tests, up from 64 at the end of P2); each chunk (C1-C6)
+went through an independent review pass with fixes applied where findings landed (silent
+mark-reviewed failures now surface an error; a filter-change race in pagination is guarded; a
+pagination test that passed without exercising its own logic was corrected). **One thing this
+session could not verify: clip playback (C5) has not been smoke-tested on a physical device or
+against a real server** - the HLS-over-mp4 choice and the cookie-auth reasoning are sound on
+paper (see DECISIONS.md ADR-011) but unconfirmed end-to-end. Do that pass before treating P3 as
+fully done; also worth a real-server check of whether `/api/review` timestamps are numeric (as
+assumed) or ever ISO strings, since the response model's `datetime` type annotation is a soft
+signal a real server hasn't disproven._
 
 ## P4 - Live video
 - [ ] Define the `LivePlayer` interface
@@ -106,3 +116,8 @@ _Milestone: feature parity with the PWA._
 - JWT cookie name and refresh behavior (`session_length` / `refresh_time`)
 - Whether Frigate has long-lived API keys / personal access tokens to store instead of a password
 - Exact snapshot / clip URL shapes and the events vs reviews endpoints
+- **P3, not yet done:** clip playback (`ClipPlayerView`'s HLS VOD manifest) on a physical device -
+  does the manifest load and do segments actually play through, confirming cookie auth covers the
+  whole HLS request chain, not just the initial fetch
+- **P3, not yet done:** whether `/api/review`'s `start_time`/`end_time` come back numeric (assumed
+  throughout `ReviewSegment`) or ever as ISO strings on some server/version
