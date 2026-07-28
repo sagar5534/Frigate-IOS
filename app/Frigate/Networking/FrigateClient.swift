@@ -76,8 +76,9 @@ actor FrigateClient {
 
     // MARK: Core
 
-    private func makeRequest(_ endpoint: Endpoint) throws -> URLRequest {
-        let apiURL = baseURL.appending(path: "api").appending(path: endpoint.path)
+    private func endpointURL(_ endpoint: Endpoint) throws -> URL {
+        let root = endpoint.basePath.map { baseURL.appending(path: $0) } ?? baseURL
+        let apiURL = root.appending(path: endpoint.path)
         guard var components = URLComponents(url: apiURL, resolvingAgainstBaseURL: false) else {
             throw APIError.invalidURL
         }
@@ -87,6 +88,11 @@ actor FrigateClient {
         guard let url = components.url else {
             throw APIError.invalidURL
         }
+        return url
+    }
+
+    private func makeRequest(_ endpoint: Endpoint) throws -> URLRequest {
+        let url = try endpointURL(endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = endpoint.method.rawValue
         request.httpBody = endpoint.body
@@ -160,5 +166,32 @@ extension FrigateClient {
     /// gets the same silent re-login + retry as JSON endpoints.
     func snapshot(camera: String, height: Int? = nil) async throws -> Data {
         try await data(for: .snapshot(camera: camera, height: height))
+    }
+
+    func fetchReviews(
+        cameras: [String] = [],
+        labels: [String] = [],
+        severity: ReviewSegment.Severity? = nil,
+        before: Double? = nil,
+        after: Double? = nil,
+        limit: Int? = nil
+    ) async throws -> [ReviewSegment] {
+        try await send(.review(cameras: cameras, labels: labels, severity: severity, before: before, after: after, limit: limit))
+    }
+
+    /// Raw webp bytes for a review segment's thumbnail (`path` is `ReviewSegment.thumbnailPath`).
+    func reviewThumbnail(path: String) async throws -> Data {
+        try await data(for: .reviewThumbnail(path: path))
+    }
+
+    /// Fully-resolved URL for a base-relative endpoint, for handing to AVPlayer/AVURLAsset.
+    func authedURL(for endpoint: Endpoint) -> URL? {
+        try? endpointURL(endpoint)
+    }
+
+    /// The session's current cookies for `url`, so `AVURLAsset` can be given
+    /// `AVURLAssetHTTPCookiesKey` - AVFoundation does not consult `URLSession`'s cookie jar itself.
+    func sessionCookies(for url: URL) -> [HTTPCookie] {
+        session.configuration.httpCookieStorage?.cookies(for: url) ?? []
     }
 }

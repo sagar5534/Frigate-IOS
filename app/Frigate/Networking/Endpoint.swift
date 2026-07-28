@@ -9,6 +9,10 @@ nonisolated struct Endpoint: Sendable {
     var query: [URLQueryItem] = []
     var body: Data? = nil
     var headers: [String: String] = [:]
+    /// Prefix joined between `baseURL` and `path`. Defaults to `"api"`. `nil` addresses the
+    /// server root - needed for the handful of routes that live outside `/api/` (review
+    /// thumbnails under `/clips/`, HLS manifests under `/vod/`).
+    var basePath: String? = "api"
 }
 
 nonisolated extension Endpoint {
@@ -38,5 +42,54 @@ nonisolated extension Endpoint {
             query.append(URLQueryItem(name: "height", value: String(height)))
         }
         return Endpoint(path: "\(camera)/latest.jpg", query: query)
+    }
+
+    /// Activity segments. Empty filter lists are omitted so the server applies its own "all"
+    /// default; `before`/`after` should both be passed together when paging (see C6) since the
+    /// server re-defaults a missing `after` to "24h before now", not "no lower bound".
+    static func review(
+        cameras: [String] = [],
+        labels: [String] = [],
+        severity: ReviewSegment.Severity? = nil,
+        before: Double? = nil,
+        after: Double? = nil,
+        limit: Int? = nil
+    ) -> Endpoint {
+        var query: [URLQueryItem] = []
+        if !cameras.isEmpty {
+            query.append(URLQueryItem(name: "cameras", value: cameras.joined(separator: ",")))
+        }
+        if !labels.isEmpty {
+            query.append(URLQueryItem(name: "labels", value: labels.joined(separator: ",")))
+        }
+        if let severity {
+            query.append(URLQueryItem(name: "severity", value: severity.rawValue))
+        }
+        if let before {
+            query.append(URLQueryItem(name: "before", value: String(before)))
+        }
+        if let after {
+            query.append(URLQueryItem(name: "after", value: String(after)))
+        }
+        if let limit {
+            query.append(URLQueryItem(name: "limit", value: String(limit)))
+        }
+        return Endpoint(path: "review", query: query)
+    }
+
+    /// A review segment's thumbnail, off the server root (not `/api/`). `path` is
+    /// `ReviewSegment.thumbnailPath`, e.g. `"clips/review/thumb-front_door-<id>.webp"`.
+    static func reviewThumbnail(path: String) -> Endpoint {
+        Endpoint(path: path, basePath: nil)
+    }
+
+    static func reviewClip(id: String) -> Endpoint {
+        Endpoint(path: "review/\(id)/clip.mp4")
+    }
+
+    /// HLS VOD manifest for a segment's camera/time range - the source Frigate recommends for
+    /// iOS playback over the progressive `clip.mp4`. Off the server root, not `/api/`.
+    static func reviewClipHLS(camera: String, start: Double, end: Double) -> Endpoint {
+        Endpoint(path: "vod/\(camera)/start/\(start)/end/\(end)/master.m3u8", basePath: nil)
     }
 }

@@ -36,4 +36,48 @@ final class EndpointTests: XCTestCase {
         let endpoint = Endpoint.snapshot(camera: "front_door", height: 300)
         XCTAssertEqual(endpoint.query, [URLQueryItem(name: "height", value: "300")])
     }
+
+    func testReviewEndpointOmitsEmptyFilters() {
+        let endpoint = Endpoint.review()
+        XCTAssertEqual(endpoint.path, "review")
+        XCTAssertEqual(endpoint.basePath, "api")
+        XCTAssertTrue(endpoint.query.isEmpty)
+    }
+
+    func testReviewEndpointIncludesProvidedFilters() {
+        let endpoint = Endpoint.review(
+            cameras: ["front_door", "backyard"],
+            labels: ["person"],
+            severity: .alert,
+            before: 200,
+            after: 100,
+            limit: 50
+        )
+        XCTAssertEqual(endpoint.query, [
+            URLQueryItem(name: "cameras", value: "front_door,backyard"),
+            URLQueryItem(name: "labels", value: "person"),
+            URLQueryItem(name: "severity", value: "alert"),
+            URLQueryItem(name: "before", value: "200.0"),
+            URLQueryItem(name: "after", value: "100.0"),
+            URLQueryItem(name: "limit", value: "50"),
+        ])
+    }
+
+    func testReviewThumbnailEndpointHasNoBasePath() {
+        let endpoint = Endpoint.reviewThumbnail(path: "clips/review/thumb-front_door-abc.webp")
+        XCTAssertEqual(endpoint.path, "clips/review/thumb-front_door-abc.webp")
+        XCTAssertNil(endpoint.basePath)
+    }
+
+    func testReviewClipEndpointStaysUnderAPI() {
+        let endpoint = Endpoint.reviewClip(id: "abc123")
+        XCTAssertEqual(endpoint.path, "review/abc123/clip.mp4")
+        XCTAssertEqual(endpoint.basePath, "api")
+    }
+
+    func testReviewClipHLSEndpointHasNoBasePath() {
+        let endpoint = Endpoint.reviewClipHLS(camera: "front_door", start: 100, end: 200)
+        XCTAssertEqual(endpoint.path, "vod/front_door/start/100.0/end/200.0/master.m3u8")
+        XCTAssertNil(endpoint.basePath)
+    }
 }
