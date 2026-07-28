@@ -25,6 +25,18 @@ nonisolated extension Endpoint {
             headers: ["Content-Type": "application/json"]
         )
     }
-    
-    
+
+    /// The latest decoded frame for a camera, falling back server-side to the most recent preview
+    /// frame (or an error placeholder image) if the camera is offline. The server still returns a
+    /// non-200 (400 invalid params, 404 unknown camera, 500 no frame available) in some cases, so
+    /// callers must handle failure, not assume an image always comes back.
+    /// `height` resizes server-side (query key is `height`, not the `h` a couple of PWA call sites
+    /// use - those are silently ignored by the server and serve full size).
+    static func snapshot(camera: String, height: Int? = nil) -> Endpoint {
+        var query: [URLQueryItem] = []
+        if let height {
+            query.append(URLQueryItem(name: "height", value: String(height)))
+        }
+        return Endpoint(path: "\(camera)/latest.jpg", query: query)
+    }
 }

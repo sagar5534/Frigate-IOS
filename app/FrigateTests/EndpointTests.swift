@@ -22,4 +22,18 @@ final class EndpointTests: XCTestCase {
         XCTAssertEqual(json?["user"], "admin")
         XCTAssertEqual(json?["password"], "s3cret")
     }
+
+    func testSnapshotEndpointWithoutHeight() {
+        let endpoint = Endpoint.snapshot(camera: "front_door")
+        XCTAssertEqual(endpoint.path, "front_door/latest.jpg")
+        XCTAssertEqual(endpoint.method, .get)
+        XCTAssertTrue(endpoint.query.isEmpty)
+    }
+
+    func testSnapshotEndpointWithHeightUsesHeightQueryKey() {
+        // The server's query param is `height`, not the `h` a couple of PWA call sites use -
+        // those are silently ignored server-side and serve full size instead of resizing.
+        let endpoint = Endpoint.snapshot(camera: "front_door", height: 300)
+        XCTAssertEqual(endpoint.query, [URLQueryItem(name: "height", value: "300")])
+    }
 }

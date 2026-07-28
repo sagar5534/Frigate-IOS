@@ -37,9 +37,10 @@ actor FrigateClient {
             let config = URLSessionConfiguration.default
             config.httpCookieAcceptPolicy = .always
             config.httpShouldSetCookies = true
-            // A private jar so servers don't cross-contaminate and so the login `Set-Cookie` is
-            // captured and auto-refreshed for the life of this client.
-            config.httpCookieStorage = HTTPCookieStorage()
+            // The bare `HTTPCookieStorage()` initializer produces a jar URLSession doesn't reliably
+            // capture Set-Cookie into - the app-group-backed variant is the one that actually works,
+            // and happens to double as the store the future Notification Service Extension can share.
+            config.httpCookieStorage = HTTPCookieStorage.sharedCookieStorage(forGroupContainerIdentifier: ServerConfigStore.appGroupSuite)
             if allowInsecure {
                 let delegate = InsecureTrustDelegate(allowInsecure: true)
                 self.trustDelegate = delegate
@@ -153,5 +154,11 @@ extension FrigateClient {
     func login(user: String, password: String) async throws {
         let endpoint = try Endpoint.login(LoginRequest(user: user, password: password))
         try await send(endpoint)
+    }
+
+    /// JPEG bytes for a camera's latest frame. Goes through `data(for:)` so a stale cookie still
+    /// gets the same silent re-login + retry as JSON endpoints.
+    func snapshot(camera: String, height: Int? = nil) async throws -> Data {
+        try await data(for: .snapshot(camera: camera, height: height))
     }
 }
