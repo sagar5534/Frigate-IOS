@@ -79,6 +79,26 @@ final class EventsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadAppliesCurrentFiltersToTheQuery() async {
+        var capturedQuery: [String: String] = [:]
+        MockURLProtocol.requestHandler = { request in
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            capturedQuery = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+            return (self.httpResponse(request.url!, 200), Data("[]".utf8))
+        }
+
+        let model = EventsModel(client: makeClient())
+        model.filters.cameras = ["front_door"]
+        model.filters.labels = ["person"]
+        model.filters.severity = .alert
+        await model.load()
+
+        XCTAssertEqual(capturedQuery["cameras"], "front_door")
+        XCTAssertEqual(capturedQuery["labels"], "person")
+        XCTAssertEqual(capturedQuery["severity"], "alert")
+    }
+
+    @MainActor
     func testLoadFailureSetsFailedState() async {
         MockURLProtocol.requestHandler = { request in
             (self.httpResponse(request.url!, 500), Data())
