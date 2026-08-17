@@ -64,10 +64,39 @@ name / session length, used to size the re-login story) and `cameras` (name -> `
 `Features/Settings/SettingsView.swift` - server URL, connection status, and log out. Minimal by
 design; expands in P8 (full settings parity with the PWA).
 
-## Feature: Events
+## Feature: Events (P3)
 
-`Features/Events/EventsPlaceholderView.swift` is a placeholder tab; the real events timeline is
-P3.
+Built on `GET /api/review` (activity **segments** - severity-tagged, grouped detections - not raw
+per-object events; see `../DECISIONS.md` ADR-009 for why).
+
+- `Models/ReviewSegment.swift` - the decoded row plus display helpers (`thumbnailPath` strips the
+  `/media/frigate/` prefix `thumb_path` comes back with; `objectSummary`; `startDate`; `duration`).
+  `hasBeenReviewed` is `var`, not `let`, so the detail screen can flip it locally after a
+  successful server round-trip.
+- `Features/Events/EventsModel.swift` - owns `state` (`.loading`/`.loaded([ReviewSegment])`/
+  `.failed`), `filters` (`EventFilters.swift`), and pagination (`hasMorePages`/`isLoadingMore`).
+  `load()` refetches from the top (used on appear, pull-to-refresh, and filter change);
+  `loadMore()` pages older activity, always sending `before` **and** `after` together (the server
+  silently re-defaults a missing `after` to 24h - see `../LEARNINGS.md`), de-duping by id, and
+  guarding against a filter change landing mid-fetch.
+- `Features/Events/EventsView.swift` - the tab root: a day-grouped `List` of `ReviewCardView` rows,
+  a filter sheet (`EventFilterSheet.swift`) bound to `EventsModel.filters` via the same
+  `@Bindable`-shadow pattern `ServerSetupView` uses, and an `.onAppear` on the last row driving
+  `loadMore()`.
+- `Features/Events/ReviewThumbnail.swift` - a self-fetching, cookie-authed image view (like
+  `AsyncImage` but routed through `FrigateClient` for 401-retry); reused by the card and the
+  detail screen.
+- `Features/Events/ReviewDetailView.swift` + `ReviewDetailModel.swift` - tapping a segment pushes
+  metadata (camera/severity/time span/objects/zones) and a mark-reviewed toggle
+  (`POST /api/reviews/viewed`); the mutation is reported back to `EventsModel.updateSegment(_:)`
+  so the list reflects it without a full reload. A failed toggle surfaces an inline error
+  (`ReviewDetailModel.errorMessage`) rather than failing silently.
+- `Features/Events/ClipPlayerView.swift` - full-screen `AVKit.VideoPlayer` playback of a segment's
+  clip via the **HLS VOD manifest**, not the progressive `clip.mp4` route - see `../DECISIONS.md`
+  ADR-011 for why, including the cookie-auth-on-HLS-segments reasoning. **Not yet verified on a
+  physical device** (see `../ROADMAP.md`).
+- `Networking/Endpoint.swift`'s `basePath` field (ADR-010) lets `reviewThumbnail`/`reviewClipHLS`
+  address routes outside `/api/` through the same client/auth/retry path as everything else.
 
 ## App shell
 

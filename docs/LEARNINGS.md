@@ -2,6 +2,52 @@
 
 Gotchas worth remembering, captured as they surface. Newest first.
 
+## A test that "passes" can still be exercising nothing
+
+P3's C6 pagination tests initially used a 1-item first page as the `loadMore()` fixture. Every
+`loadMore`-related assertion passed - but for the wrong reason: `EventsModel` correctly treats a
+page smaller than its page size (100) as "no more history," so `hasMorePages` went `false` right
+after the *first* `load()`, and every subsequent `loadMore()` call in the tests silently no-op'd
+before ever reaching its real logic (cursor math, de-dupe, append). `xcodebuild test` was green
+throughout. The bug only surfaced when the fixtures were corrected to a 100-item page (matching
+the real page size) and several assertions then failed against the *actual* `loadMore()` code path
+for the first time. Lesson: a green suite proves the assertions held, not that the code path under
+test actually ran - when a test depends on crossing an internal threshold (a page-size cutoff, a
+retry limit, a cache-eviction count), the fixture has to genuinely cross it, or the test is
+inert. Independent review caught a second, subtler instance of the same trap in a follow-up test
+(a "stops on an all-duplicate page" test used a *short* duplicate page, which independently
+produces the same `hasMorePages == false` outcome regardless of whether the duplicate-detection
+guard being tested existed at all).
+
+## Frigate's `/api/review` (and `/api/events`) silently re-default a missing `after` to 24h
+
+Passing `before` without `after` doesn't mean "no lower bound" - the server defaults `after` to
+`datetime.now() - timedelta(hours=24)` regardless of what `before` says. A "load older" pagination
+cursor that only walks `before` backward returns nothing once it pages past 24 hours ago, with no
+error - it just looks like history stops existing. Any cursor against this endpoint must send both
+bounds on every request, including page 2+ (`EventsModel.loadMore`, `Endpoint.review`).
+
+## A review segment's thumbnail lives outside `/api/`, and needs a path transform
+
+`GET /api/review` returns `thumb_path` as a **server filesystem path**
+(`/media/frigate/clips/review/thumb-<camera>-<id>.webp`), not a request path. The actual HTTP
+route serving that file is `{base}/clips/review/thumb-....webp` (cookie-authed, off the server
+root) - strip the `/media/frigate/` prefix to get there (`ReviewSegment.thumbnailPath`). This
+doesn't generalize to a rule like "strip `/media/frigate/`" for every media path; it's specific to
+how nginx roots the `/clips/` location - confirmed by reading the PWA's own transform
+(`ReviewCard.tsx`) rather than guessing.
+
+## nginx-vod-module's `secure_token` on Frigate's `/vod/` is a query-string passthrough, not a signing requirement
+
+Frigate's nginx config sets `secure_token $args;` on the `/vod/` location (HLS manifests/segments).
+This nginx-vod-module directive appends a request's own query string to the segment URLs it
+generates inside a manifest - it is **not** an independent auth/signing check. Since app requests
+to `/vod/.../master.m3u8` carry no query string, `$args` is empty and the directive is a no-op.
+The actual gate on `/vod/` is the same `auth_request` (cookie-forwarding) mechanism used
+everywhere else behind Frigate's auth proxy, applied per-request to the manifest and each segment
+fetch alike. Worth knowing before assuming an unfamiliar nginx directive implies extra
+client-side work - read what the directive actually does, not just its name.
+
 ## A bare `HTTPCookieStorage()` doesn't actually capture `Set-Cookie` for `URLSession`
 
 `FrigateClient` gave each client its own private jar via `config.httpCookieStorage =

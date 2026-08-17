@@ -150,6 +150,76 @@ final class FrigateClientTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testFetchReviewsDecodesListFromComposedURL() async throws {
+        let json = Data("""
+        [
+          {
+            "id": "1", "camera": "front_door", "start_time": 100.0, "end_time": 130.0,
+            "severity": "alert", "has_been_reviewed": false,
+            "thumb_path": "/media/frigate/clips/review/thumb-front_door-1.webp",
+            "data": {"detections": [], "objects": ["person"], "sub_labels": [], "zones": [], "audio": []}
+          }
+        ]
+        """.utf8)
+
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://nvr.local:8971/api/review?cameras=front_door&severity=alert"
+            )
+            return (self.httpResponse(request.url!, 200), json)
+        }
+
+        let segments = try await makeClient().fetchReviews(cameras: ["front_door"], severity: .alert)
+        XCTAssertEqual(segments.map(\.id), ["1"])
+    }
+
+    func testReviewThumbnailFetchesRawBytesFromServerRootNotAPI() async throws {
+        let webpBytes = Data([0x52, 0x49, 0x46, 0x46])
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://nvr.local:8971/clips/review/thumb-front_door-1.webp"
+            )
+            return (self.httpResponse(request.url!, 200), webpBytes)
+        }
+
+        let data = try await makeClient().reviewThumbnail(path: "clips/review/thumb-front_door-1.webp")
+        XCTAssertEqual(data, webpBytes)
+    }
+
+    func testAuthedURLComposesBaseRelativeURL() async {
+        let url = await makeClient().authedURL(for: .reviewThumbnail(path: "clips/review/thumb-x.webp"))
+        XCTAssertEqual(url?.absoluteString, "https://nvr.local:8971/clips/review/thumb-x.webp")
+    }
+
+    func testSessionCookiesReturnsCookieFromTheSessionsJar() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cookie = HTTPCookie(properties: [
+            .domain: "nvr.local", .path: "/", .name: "frigate_token", .value: "abc123",
+        ])!
+        session.configuration.httpCookieStorage?.setCookie(cookie)
+        let client = FrigateClient(baseURL: baseURL, session: session)
+
+        let cookies = await client.sessionCookies(for: baseURL)
+        XCTAssertTrue(cookies.contains { $0.name == "frigate_token" && $0.value == "abc123" })
+    }
+
+    func testSetReviewedComposesURLAndMethod() async throws {
+        // Body encoding (ids/reviewed shape) is covered at the Endpoint level in
+        // EndpointTests.testSetReviewedEndpoint - inspecting `httpBody` through MockURLProtocol
+        // isn't reliable once URLSession dispatches the request (it can move to a body stream).
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://nvr.local:8971/api/reviews/viewed")
+            XCTAssertEqual(request.httpMethod, "POST")
+            return (self.httpResponse(request.url!, 200), Data())
+        }
+
+        try await makeClient().setReviewed(id: "abc123", reviewed: false)
+    }
+
     func testTransportFailureMapsToTransport() async {
         MockURLProtocol.requestHandler = { _ in
             throw URLError(.notConnectedToInternet)

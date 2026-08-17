@@ -2,6 +2,73 @@
 
 Short architecture decision records: the choice, why, and consequences. Newest first.
 
+## ADR-011 - Clip playback: HLS VOD manifest, not progressive `clip.mp4`
+
+**Context:** P3's roadmap called for clip playback "via AVPlayer (mp4 - the easy video)," and the
+implementation plan (`docs/plans/P3-events-timeline.md`) said to try the fragmented `clip.mp4`
+route first and fall back to HLS only if progressive playback proved unreliable **on a physical
+device**. No device was available in the session that implemented C5 (simulator only).
+
+**Decision:** Ship the HLS VOD manifest (`GET {base}/vod/{camera}/start/{start}/end/{end}/master.m3u8`,
+`Endpoint.reviewClipHLS`) as the **only** clip source; the `clip.mp4` route
+(`Endpoint.reviewClip`) is left defined but unused. Reasoning, verified against the real Frigate
+source (`~/Documents/frigate`) rather than assumed:
+- `frigate/api/media.py`'s `recording_clip` (which both `event_clip` and `review_clip` delegate
+  to) is a `StreamingResponse` piping ffmpeg's stdout live, with `-movflags
+  frag_keyframe+empty_moov` and no `Content-Length`/Range support - AVPlayer's duration detection
+  and scrubbing are unreliable against that shape.
+- The route's own FastAPI `description` says outright: *"For iOS devices, use the master.m3u8 HLS
+  link instead of clip.mp4. Safari does not reliably process progressive mp4 files."*
+- Frigate's own PWA plays recordings via `vod/.../master.m3u8` through hls.js, not through
+  `clip.mp4` - HLS is the primary path upstream, not a fallback.
+- Cookie auth for the HLS asset goes through `AVURLAssetHTTPCookiesKey` at `AVURLAsset`
+  construction (AVFoundation doesn't consult `URLSession`'s cookie jar). This needs to cover
+  segment fetches, not just the manifest: Frigate's nginx emits same-host relative segment URLs
+  (`vod_base_url`/`vod_segments_base_url` both empty) and gates every request under `/vod/`
+  through the same cookie-forwarding `auth_request` already proven for the thumbnail path
+  (`Endpoint.reviewThumbnail`), independent of nginx-vod-module's `secure_token` directive (that
+  directive just passes a request's own query string through to generated segment URLs; the
+  request has none, so it's a no-op here). Same-host relative URLs + an explicit cookie list is
+  Apple's documented pattern for authenticating HLS behind a cookie session.
+
+**Consequences:** No dual-path fallback machinery to maintain. **Not yet smoke-tested on a
+physical device/real server** - the analysis above is sound but unverified end-to-end; do that
+before treating clip playback as fully done (see `docs/ROADMAP.md` P3).
+
+## ADR-010 - `Endpoint.basePath`: address routes outside `/api/`
+
+**Context:** C1 needed to reach review thumbnails (`{base}/clips/review/thumb-....webp`) and,
+later, HLS manifests (`{base}/vod/.../master.m3u8`) - both cookie-authed like every other Frigate
+route, but living off the server root rather than under `/api/`, which `FrigateClient` had
+hardcoded into every request (`baseURL.appending(path: "api").appending(path: endpoint.path)`).
+
+**Decision:** Add `var basePath: String? = "api"` to `Endpoint`; `nil` addresses the server root.
+`FrigateClient`'s URL composition (factored into a shared `endpointURL(_:)` used by both the
+request builder and the new `authedURL(for:)`) honors it. Existing endpoints default to `"api"`,
+so this is additive - no behavior change for P1/P2 code.
+
+**Consequences:** One seam handles every route shape the app needs (JSON API, JPEG snapshots,
+WebP thumbnails, HLS manifests) through the same auth/401-retry path, rather than a second
+ad-hoc client for "not-/api/" requests.
+
+## ADR-009 - Events timeline surfaces review segments, not raw tracked objects
+
+**Context:** Frigate exposes two list endpoints for "what happened": `/api/events` (one row per
+tracked object - person, car, etc. - with direct per-object thumbnail/snapshot/clip URLs; backs
+the PWA's Explore/search view) and `/api/review` (activity **segments** tagged `alert`/`detection`
+severity, with per-user reviewed state; backs the PWA's default Review timeline).
+
+**Decision:** Build P3 on `/api/review`. Reviewed segments read like an NVR "what happened"
+overview - severity, objects/zones seen, a time span, reviewed/unreviewed state - rather than a
+flat dump of individual detections. `/api/events` is deferred; if per-object drill-down or search
+is ever needed, a segment's `data.detections` already carries the underlying event ids.
+
+**Consequences:** Review's thumbnail/clip media live off the server root (not `/api/`), and the
+list is grouped/severity-tagged out of the box rather than needing client-side grouping logic.
+Traded away: `/api/events`' richer per-object filters (`sub_labels`, `zones`, `min_score`, etc.) -
+none of that is available for the P3 timeline unless a later phase adds the events endpoint
+alongside review.
+
 ## ADR-008 - Single probe: `AppModel.connect` owns reachability + http fallback
 
 **Context:** Through C2-C6 the reachability check ran twice per Connect - once in
