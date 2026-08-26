@@ -45,19 +45,29 @@ Errors are a single `APIError` enum so UI can exhaustively switch on failure mod
 `Models/FrigateConfig.swift` decodes a deliberately small subset of the real `/api/config` payload
 (which has dozens of top-level keys - detectors, ffmpeg, motion, recording, etc.): `auth` (cookie
 name / session length, used to size the re-login story) and `cameras` (name -> `enabled`).
-`enabledCameraNames` is the sorted, filtered list the camera grid actually renders.
+`enabledCameraNames` is the sorted, filtered list the camera list actually renders.
 
 ## Feature: Cameras (P2)
 
-- `Features/Cameras/CameraGridView.swift` + `CameraGridModel.swift` - a `LazyVGrid` of tiles, one
-  per enabled camera. `CameraGridModel` fetches `GET /api/{camera}/latest.jpg?height=300` for every
-  camera concurrently (`withTaskGroup`) and re-runs on a 5s loop (`startAutoRefresh()`/
+- `Features/Cameras/CameraListView.swift` + `CameraGridModel.swift` - a `LazyVStack` list, one
+  full-width row per enabled camera (not a grid - each camera gets the full screen width, stacked
+  top to bottom, free-scrolling). `CameraGridModel` fetches `GET /api/{camera}/latest.jpg?height=720`
+  for every camera concurrently (`withTaskGroup`) and re-runs on a 5s loop (`startAutoRefresh()`/
   `stopAutoRefresh()`, driven from the view's `.task`/`.onDisappear` so it stops when the tab isn't
   visible).
-- `Features/Cameras/CameraDetailView.swift` + `CameraDetailModel.swift` - tapping a tile pushes a
-  single-camera view running the same refresh pattern at a larger size (720p).
-- `SnapshotImage` (in `CameraGridView.swift`) renders the shared `loading` / `loaded(Data)` /
-  `failed` states for both the grid tile and the detail view.
+- `Features/Cameras/CameraDetailView.swift` + `CameraDetailModel.swift` - tapping a row pushes a
+  single-camera view running the same refresh pattern at the same size (720p).
+- `SnapshotState.loaded` carries a `Snapshot { data, capturedAt }`, not bare `Data` -
+  `CameraGridModel.SnapshotState.advanced(with:fetchedAt:)` is the shared staleness rule used by
+  both models: identical bytes on a refresh keep the previous `capturedAt` (a stuck stream shouldn't
+  read as freshly fetched), and a failed fetch keeps showing the last good frame - `SnapshotState`
+  only drops to `.failed` when nothing has ever loaded for that camera.
+- `SnapshotImage` (in `CameraListView.swift`) renders the shared `loading` / `loaded(Snapshot)` /
+  `failed` states for both the list row and the detail view.
+- `Features/Cameras/SnapshotAgeBadge.swift` - the bottom-right freshness badge (Apple Home-style):
+  "Now" for a few seconds after a fetch, then a relative age ("5s ago", "1m ago", "1h ago", "1d ago")
+  via a `TimelineView(.periodic(from:by:))` that ticks once a second independent of the image redraw.
+  Locale is pinned to en_US since nothing else in the app is localized yet.
 
 ## Feature: Settings
 

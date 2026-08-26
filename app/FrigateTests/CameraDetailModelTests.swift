@@ -33,7 +33,7 @@ final class CameraDetailModelTests: XCTestCase {
 
         await model.refresh()
 
-        XCTAssertEqual(model.state, .loaded(jpegBytes))
+        XCTAssertEqual(model.state.snapshot?.data, jpegBytes)
     }
 
     @MainActor
@@ -46,5 +46,50 @@ final class CameraDetailModelTests: XCTestCase {
         await model.refresh()
 
         XCTAssertEqual(model.state, .failed)
+    }
+
+    @MainActor
+    func testRefreshKeepsLastGoodSnapshotOnSubsequentFailure() async {
+        var shouldFail = false
+        MockURLProtocol.requestHandler = { request in
+            shouldFail
+                ? (self.httpResponse(request.url!, 500), Data())
+                : (self.httpResponse(request.url!, 200), self.jpegBytes)
+        }
+
+        let model = CameraDetailModel(client: makeClient(), cameraName: "front_door")
+        await model.refresh()
+        XCTAssertEqual(model.state.snapshot?.data, jpegBytes)
+
+        shouldFail = true
+        await model.refresh()
+        XCTAssertEqual(
+            model.state.snapshot?.data,
+            jpegBytes,
+            "a failed fetch should not blank out the last good frame"
+        )
+    }
+
+    @MainActor
+    func testRefreshKeepsCapturedAtWhenBytesAreUnchanged() async {
+        MockURLProtocol.requestHandler = { request in
+            (self.httpResponse(request.url!, 200), self.jpegBytes)
+        }
+
+        let firstFetch = Date(timeIntervalSince1970: 2_000)
+        let secondFetch = Date(timeIntervalSince1970: 2_010)
+        var currentTime = firstFetch
+        let model = CameraDetailModel(client: makeClient(), cameraName: "front_door", now: { currentTime })
+
+        await model.refresh()
+        XCTAssertEqual(model.state.snapshot?.capturedAt, firstFetch)
+
+        currentTime = secondFetch
+        await model.refresh()
+        XCTAssertEqual(
+            model.state.snapshot?.capturedAt,
+            firstFetch,
+            "identical bytes should not reset the freshness clock"
+        )
     }
 }

@@ -53,7 +53,7 @@ every post-login request 401'd (see LEARNINGS.md). Sign-in now works end-to-end.
 ## P2 - Camera grid
 - [x] App shell / navigation (Cameras, Events) - `MainTabView` (Cameras/Events/Settings tabs) replaces the P1 `MainPlaceholderView`
 - [x] Fetch `/api/config`, parse camera list - `FrigateConfig.CameraConfig.enabled` + `enabledCameraNames`; verified field shapes against a real server (frigate.sagarp.ca)
-- [x] Camera grid of snapshot tiles - `CameraGridView`/`CameraGridModel`, `GET /api/{camera}/latest.jpg?height=N`
+- [x] Camera list of snapshot rows - `CameraListView`/`CameraGridModel`, `GET /api/{camera}/latest.jpg?height=N`. Reworked from a grid to a full-width, free-scrolling list (one camera per row) with a bottom-right "x ago"/"Now" freshness badge (`SnapshotAgeBadge`), Apple Home-style
 - [x] Auto-refresh snapshots every few seconds - `CameraGridModel.startAutoRefresh()` (5s loop, cancelled on disappear)
 - [x] Tap camera to open a larger snapshot / detail view - `CameraDetailView`/`CameraDetailModel` (720p, own refresh loop)
 - [x] Minimal Settings: server info, connection status, log out - `SettingsView`
