@@ -1,7 +1,9 @@
 import Foundation
 import Observation
 
-/// Same auto-refresh loop as `CameraGridModel`, scoped to one camera at a larger snapshot size.
+/// Same auto-refresh loop and staleness rule as `CameraGridModel` (see
+/// `CameraGridModel.SnapshotState.advanced(with:fetchedAt:)`), scoped to one camera at a larger
+/// snapshot size.
 @MainActor
 @Observable
 final class CameraDetailModel {
@@ -10,12 +12,19 @@ final class CameraDetailModel {
     private let client: FrigateClient
     private let cameraName: String
     private let height: Int?
+    private let now: () -> Date
     private var refreshTask: Task<Void, Never>?
 
-    init(client: FrigateClient, cameraName: String, height: Int? = 720) {
+    init(
+        client: FrigateClient,
+        cameraName: String,
+        height: Int? = 720,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.client = client
         self.cameraName = cameraName
         self.height = height
+        self.now = now
     }
 
     func startAutoRefresh(interval: Duration = .seconds(5)) {
@@ -34,11 +43,12 @@ final class CameraDetailModel {
     }
 
     func refresh() async {
+        let result: Result<Data, Error>
         do {
-            let data = try await client.snapshot(camera: cameraName, height: height)
-            state = .loaded(data)
+            result = .success(try await client.snapshot(camera: cameraName, height: height))
         } catch {
-            state = .failed
+            result = .failure(error)
         }
+        state = state.advanced(with: result, fetchedAt: now())
     }
 }

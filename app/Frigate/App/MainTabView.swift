@@ -8,7 +8,7 @@ struct MainTabView: View {
 
     var body: some View {
         TabView {
-            CameraGridView(client: client, cameraNames: config.enabledCameraNames)
+            CameraListView(client: client, cameraNames: config.enabledCameraNames)
                 .tabItem { Label("Cameras", systemImage: "video") }
 
             EventsView(client: client, cameraNames: config.enabledCameraNames)

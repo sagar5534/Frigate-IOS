@@ -13,6 +13,13 @@ struct CameraDetailView: View {
         ScrollView {
             SnapshotImage(state: model.state)
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(alignment: .bottomTrailing) {
+                    if let snapshot = model.state.snapshot {
+                        SnapshotAgeBadge(capturedAt: snapshot.capturedAt)
+                            .padding(8)
+                    }
+                }
                 .padding()
         }
         .navigationTitle(cameraName.replacingOccurrences(of: "_", with: " "))
