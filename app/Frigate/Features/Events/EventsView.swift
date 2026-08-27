@@ -5,6 +5,10 @@ struct EventsView: View {
     let cameraNames: [String]
     @State private var model: EventsModel
     @State private var showingFilters = false
+    /// Day sections the user has collapsed, keyed by `Calendar.startOfDay`. Collapsing a day
+    /// hides its cards so the next day's header slides up right underneath - the quickest way to
+    /// skip past a day you've already seen.
+    @State private var collapsedDays: Set<Date> = []
 
     init(client: FrigateClient, cameraNames: [String]) {
         self.client = client
@@ -40,18 +44,24 @@ struct EventsView: View {
                 case .loaded(let segments):
                     List {
                         ForEach(daySections(for: segments), id: \.day) { section in
-                            Section(section.day.formatted(date: .abbreviated, time: .omitted)) {
-                                ForEach(section.segments) { segment in
-                                    NavigationLink {
-                                        ReviewDetailView(client: client, segment: segment, onUpdate: model.updateSegment)
-                                    } label: {
-                                        ReviewCardView(client: client, segment: segment)
-                                    }
-                                    .onAppear {
-                                        guard segment.id == segments.last?.id else { return }
-                                        Task { await model.loadMore() }
+                            Section {
+                                if !collapsedDays.contains(section.day) {
+                                    ForEach(section.segments) { segment in
+                                        NavigationLink {
+                                            ReviewDetailView(client: client, segment: segment, onUpdate: model.updateSegment)
+                                        } label: {
+                                            ReviewCardView(client: client, segment: segment)
+                                        }
+                                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                                        .listRowSeparator(.hidden)
+                                        .onAppear {
+                                            guard segment.id == segments.last?.id else { return }
+                                            Task { await model.loadMore() }
+                                        }
                                     }
                                 }
+                            } header: {
+                                dayHeader(section.day)
                             }
                         }
                         if model.isLoadingMore {
@@ -95,6 +105,32 @@ struct EventsView: View {
     private var labelOptions: [String] {
         guard case .loaded(let segments) = model.state else { return [] }
         return Array(Set(segments.flatMap(\.data.objects))).sorted()
+    }
+
+    /// Tappable section header - toggles that day's cards collapsed/expanded so the header
+    /// doubles as a jump point to the next day.
+    private func dayHeader(_ day: Date) -> some View {
+        let isCollapsed = collapsedDays.contains(day)
+        return Button {
+            withAnimation(.snappy) {
+                if isCollapsed {
+                    collapsedDays.remove(day)
+                } else {
+                    collapsedDays.insert(day)
+                }
+            }
+        } label: {
+            HStack {
+                Text(day.formatted(date: .abbreviated, time: .omitted))
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .textCase(nil)
     }
 
     /// Segments are already newest-first; group into calendar-day sections without re-sorting
