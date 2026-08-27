@@ -186,3 +186,31 @@ project-wide default (UI code still wants MainActor-by-default). **Gotcha:** `no
 primary type declaration does not cover members declared in an `extension` - the extension inherits
 the MainActor default independently, so `Endpoint`'s static builders needed `nonisolated extension
 Endpoint { ... }` too.
+
+## Looping video in a card (Recent Activity strip)
+
+Four things that are not obvious and each cost a real behaviour if missed:
+
+- **`AVKit.VideoPlayer` steals taps.** It installs a tap gesture recognizer (to reveal its
+  transport bar), so a card wrapped in a `NavigationLink` looks right and is untappable. It also
+  letterboxes onto black with no aspect-fill option. For chrome-less card playback, host an
+  `AVPlayerLayer` via `UIViewRepresentable` (override `UIView.layerClass` so the layer resizes
+  with the view for free) and set `.allowsHitTesting(false)` on the SwiftUI side.
+- **`AVPlayerLooper` depends on `AVQueuePlayer`'s default `actionAtItemEnd == .advance`.** Setting
+  `.none` - the idiom you'd reach for with the manual `AVPlayerItemDidPlayToEndTime` +
+  `seek(.zero)` loop - silently disables looping. The looper must also be strongly retained;
+  looping stops the moment it deallocates. `teardown()` has to `disableLooping()` before releasing
+  the player, or the pipeline leaks.
+- **An `AVPlayerLayer` with no frame yet is transparent, not black.** Stacking one over a still
+  thumbnail in a `ZStack` gives you the loading state and the failure fallback for free: a card
+  whose video 404s just stays a still image. Crossfade on the layer's `isReadyForDisplay` (KVO) -
+  both `play()` returning and `item.status == .readyToPlay` fire before a frame is actually up.
+- **iOS caps simultaneous H.264 decode sessions** at an undocumented 3-4, and past it the failure
+  is silent (`.readyToPlay` but black, or `AVFoundationErrorDomain -11800`). A `LazyHStack` of
+  220pt cards realizes ~2 visible + 1-2 buffered, which fits only because `teardown()` runs on
+  `.onDisappear`. `.task(id:)` and `.onDisappear` share the same lifecycle, so a card torn down by
+  navigating away restarts cleanly on return.
+
+Unrelated but adjacent: `@Observable` fires on *assignment*, not on change. A poll that re-publishes
+an identical list still invalidates the view - guard on equality before assigning, or a 30s refresh
+re-identifies the cards and restarts their playback.

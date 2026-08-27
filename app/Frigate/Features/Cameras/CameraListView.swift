@@ -20,17 +20,27 @@ struct CameraListView: View {
                     )
                 } else {
                     ScrollView {
-                        LazyVStack(spacing: 16) {
-                            ForEach(model.cameraNames, id: \.self) { name in
-                                NavigationLink {
-                                    CameraDetailView(client: client, cameraName: name)
-                                } label: {
-                                    CameraRow(state: model.snapshots[name] ?? .loading)
+                        // spacing: 0 is load-bearing. The strip renders to zero height when there
+                        // is no recent activity, and any spacing here would leave a phantom gap
+                        // above the first camera row on a quiet server.
+                        VStack(spacing: 0) {
+                            // Sits outside the LazyVStack's padding so it can bleed to the screen
+                            // edges; it applies its own 16pt inset to line the first card up with
+                            // the camera rows.
+                            RecentActivityStrip(client: client, cameraNames: model.cameraNames)
+
+                            LazyVStack(spacing: 16) {
+                                ForEach(model.cameraNames, id: \.self) { name in
+                                    NavigationLink {
+                                        CameraDetailView(client: client, cameraName: name)
+                                    } label: {
+                                        CameraRow(state: model.snapshots[name] ?? .loading)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
+                            .padding(16)
                         }
-                        .padding(16)
                     }
                 }
             }

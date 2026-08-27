@@ -63,6 +63,32 @@ final class EndpointTests: XCTestCase {
         ])
     }
 
+    func testReviewEndpointOmitsReviewedWhenNil() {
+        let endpoint = Endpoint.review(severity: .alert, reviewed: nil)
+        XCTAssertFalse(
+            endpoint.query.contains { $0.name == "reviewed" },
+            "nil is the server's 'no filter' case, which is a third state - not the same as 0"
+        )
+    }
+
+    func testReviewEndpointEncodesReviewedAsAnIntegerFlag() {
+        XCTAssertEqual(
+            Endpoint.review(reviewed: false).query,
+            [URLQueryItem(name: "reviewed", value: "0")]
+        )
+        XCTAssertEqual(
+            Endpoint.review(reviewed: true).query,
+            [URLQueryItem(name: "reviewed", value: "1")]
+        )
+    }
+
+    func testReviewPreviewMP4Endpoint() {
+        let endpoint = Endpoint.reviewPreviewMP4(id: "abc123")
+        XCTAssertEqual(endpoint.path, "review/abc123/preview")
+        XCTAssertEqual(endpoint.basePath, "api")
+        XCTAssertEqual(endpoint.query, [URLQueryItem(name: "format", value: "mp4")])
+    }
+
     func testReviewThumbnailEndpointHasNoBasePath() {
         let endpoint = Endpoint.reviewThumbnail(path: "clips/review/thumb-front_door-abc.webp")
         XCTAssertEqual(endpoint.path, "clips/review/thumb-front_door-abc.webp")

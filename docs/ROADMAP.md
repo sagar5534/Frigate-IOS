@@ -83,6 +83,22 @@ fully done; also worth a real-server check of whether `/api/review` timestamps a
 assumed) or ever ISO strings, since the response model's `datetime` type annotation is a soft
 signal a real server hasn't disproven._
 
+## Recent Activity strip (P8 parity, pulled forward)
+- [x] Horizontal strip of looping preview clips above the camera list, mirroring the row Frigate's
+  own PWA puts atop its live dashboard - `Features/RecentActivity/` (`RecentActivityModel`,
+  `RecentActivityStrip`, `RecentActivityCard`, `LoopingVideoPlayer`), slotted into
+  `CameraListView`. Same query as the PWA (`severity=alert&reviewed=0&limit=10` + a client-side
+  "started within the last hour" cut, which the server has no parameter for); 30s poll in place of
+  the PWA's websocket. Video comes from `GET /api/review/{id}/preview?format=mp4` for every card -
+  the server has already time-compressed it ~8.33x, so it plays at rate 1.0 and needs none of the
+  seek-into-the-hourly-preview-at-8x machinery the PWA uses for older segments.
+- Camera scoping: the PWA's `alertCameras` scopes to the selected camera group. We have one
+  Cameras page, so the strip takes `config.enabledCameraNames` - the cameras the screen itself
+  shows. That parameter is the seam for camera groups when they land.
+- _Verified end-to-end against the live server (frigate.sagarp.ca) in the simulator: cards render
+  and loop, scrolling snaps with no black cards, tap pushes `ReviewDetailView`, marking reviewed
+  removes the card, and the empty state leaves no gap above the camera list._
+
 ## P4 - Live video
 - [ ] Define the `LivePlayer` interface
 - [ ] `HLSPlayer` implementation (AVPlayer + HLS)

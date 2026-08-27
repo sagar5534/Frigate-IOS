@@ -174,9 +174,18 @@ extension FrigateClient {
         severity: ReviewSegment.Severity? = nil,
         before: Double? = nil,
         after: Double? = nil,
-        limit: Int? = nil
+        limit: Int? = nil,
+        reviewed: Bool? = nil
     ) async throws -> [ReviewSegment] {
-        try await send(.review(cameras: cameras, labels: labels, severity: severity, before: before, after: after, limit: limit))
+        try await send(.review(
+            cameras: cameras,
+            labels: labels,
+            severity: severity,
+            before: before,
+            after: after,
+            limit: limit,
+            reviewed: reviewed
+        ))
     }
 
     /// Raw webp bytes for a review segment's thumbnail (`path` is `ReviewSegment.thumbnailPath`).

@@ -47,13 +47,19 @@ nonisolated extension Endpoint {
     /// Activity segments. Empty filter lists are omitted so the server applies its own "all"
     /// default; `before`/`after` should both be passed together when paging (see C6) since the
     /// server re-defaults a missing `after` to "24h before now", not "no lower bound".
+    ///
+    /// `reviewed` maps to the server's integer flag: `false` -> `reviewed=0` (only segments the
+    /// current user hasn't marked reviewed) and `true` -> `reviewed=1` (only ones they have).
+    /// Omitted entirely when `nil`, which is the server's "no filter" case - note that's a third
+    /// state, not the same as `0`.
     static func review(
         cameras: [String] = [],
         labels: [String] = [],
         severity: ReviewSegment.Severity? = nil,
         before: Double? = nil,
         after: Double? = nil,
-        limit: Int? = nil
+        limit: Int? = nil,
+        reviewed: Bool? = nil
     ) -> Endpoint {
         var query: [URLQueryItem] = []
         if !cameras.isEmpty {
@@ -74,6 +80,9 @@ nonisolated extension Endpoint {
         if let limit {
             query.append(URLQueryItem(name: "limit", value: String(limit)))
         }
+        if let reviewed {
+            query.append(URLQueryItem(name: "reviewed", value: reviewed ? "1" : "0"))
+        }
         return Endpoint(path: "review", query: query)
     }
 
@@ -85,6 +94,25 @@ nonisolated extension Endpoint {
 
     static func reviewClip(id: String) -> Endpoint {
         Endpoint(path: "review/\(id)/clip.mp4")
+    }
+
+    /// The server-rendered preview clip for a review segment: a low-resolution (180px tall)
+    /// MP4 covering the segment's span plus 8s of padding either side.
+    ///
+    /// Usable where `reviewClip` isn't. Frigate renders this one to a file on disk and hands it to
+    /// nginx via `X-Accel-Redirect`, so it arrives with a `Content-Length` and honours Range -
+    /// AVPlayer can determine its duration and loop it. `clip.mp4` is piped live from ffmpeg with
+    /// neither, which is why `ClipPlayerView` has to go through the HLS VOD manifest instead.
+    ///
+    /// The server has *already* compressed time by ~8.33x when generating this (it re-times the
+    /// 1-2fps preview frames to 8fps), so play it at rate 1.0 - speeding it up further is what the
+    /// PWA does to the raw hourly preview files, a different source entirely.
+    ///
+    /// Returns 404 when no preview file covers the segment's time range (preview generation
+    /// disabled, or the recording aged out), so callers must degrade gracefully rather than
+    /// assume a video always comes back.
+    static func reviewPreviewMP4(id: String) -> Endpoint {
+        Endpoint(path: "review/\(id)/preview", query: [URLQueryItem(name: "format", value: "mp4")])
     }
 
     /// Marks one review segment reviewed/unreviewed. Body shape matches the server's
