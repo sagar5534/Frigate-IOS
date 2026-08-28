@@ -343,3 +343,38 @@ for on a silent stream.** `bytesReceived` and `framesDecoded` split "the media p
 from "the media path works and nothing is consuming it", and those look identical on screen while
 pointing at opposite fixes. Without the numbers the natural conclusion was "port 8555 is blocked" -
 which the app was busily telling the user, having reached `connected` seconds earlier.
+
+## A signal that fires once is not a signal that fires continuously
+
+This one shape produced three separate bugs in P4, each found later and more expensively than the
+last, and each looking like a different problem:
+
+1. **First-frame detection hung off `RTCMTLVideoView.delegate`.** That delegate fires as a side
+   effect of the view *rendering*, which needs a window, non-zero bounds and working Metal. Video
+   decoded 73 frames and it never fired once, so the app reported the stream unreachable.
+2. **The frame watchdog read a timestamp only written on the first frame.** Every healthy stream
+   therefore looked stalled five seconds in.
+3. **Clearing the player's `hasVideoFrames` without re-arming the observer** latched it false for
+   the life of the player, because the observer only reports the *first* frame after a reset. A
+   one-second wifi blip would have left "Reconnecting" over visibly moving video, then torn down a
+   working stream about ten seconds later - worse than the frozen-picture case the change was
+   meant to fix.
+
+The trap is that "has video started?" and "is video still flowing?" read like the same question and
+need opposite implementations. A latch answers the first and is actively wrong for the second; a
+continuously refreshed value answers both. Where the cost of refreshing continuously is the worry -
+here, an actor hop per frame at 30fps - the answer is a lock-guarded value the watcher *samples*,
+not a push.
+
+Two habits that would have caught all three:
+
+- **Ask what re-arms it.** Any flag cleared in more than one place needs a single function that
+  clears the flag and re-arms its source together, or the two drift apart. `forgetVideoFrames()`
+  exists for exactly this.
+- **Test the resumption, not just the arrival.** `VideoFrameObserver`'s tests assert that `reset()`
+  makes the next frame report again. Tests that only checked "the first frame is reported once"
+  passed happily through instance 3.
+
+Worth noting how each was found: the first by `inbound-rtp` statistics, the second and third by
+running the app and looking at it. None were visible to the unit tests that existed at the time, and
+the third was introduced *by* the fix for the second.

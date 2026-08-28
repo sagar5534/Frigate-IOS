@@ -221,6 +221,7 @@ final class WebRTCLivePlayer: LivePlayer {
             try await peerConnection.setLocalDescription(offer)
             guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: peerConnection) else { return }
             try await signaling.send(.offer(sdp: offer.sdp))
+            guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: peerConnection) else { return }
             LiveLog.logger.info("offer sent src=\(self.streamName, privacy: .public)")
 
             // Only now start trickling our candidates. go2rtc creates its peer connection when it
@@ -416,9 +417,13 @@ final class WebRTCLivePlayer: LivePlayer {
         frameWatchdog = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.frameWatchdogInterval)
-                guard !Task.isCancelled, let self,
-                      let lastFrameAt = self.frameObserver?.lastFrameAt
-                else { return }
+                guard !Task.isCancelled, let self else { return }
+                guard let lastFrameAt = self.frameObserver?.lastFrameAt else {
+                    // `reset()` cleared liveness, so this watchdog is for a stream that no longer
+                    // exists. Whoever reset it owns starting the next one.
+                    self.frameWatchdog = nil
+                    return
+                }
                 if ContinuousClock.now - lastFrameAt > Self.frameWatchdogInterval {
                     LiveLog.logger.info("frames stopped src=\(self.streamName, privacy: .public)")
                     self.frameWatchdog = nil

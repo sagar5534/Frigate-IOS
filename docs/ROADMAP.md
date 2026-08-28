@@ -99,7 +99,7 @@ signal a real server hasn't disproven._
   and loop, scrolling snaps with no black cards, tap pushes `ReviewDetailView`, marking reviewed
   removes the card, and the empty state leaves no gap above the camera list._
 
-## P4 - Live video (WebRTC)
+## P4 - Live video (WebRTC) - DONE
 Frigate exposes **no live HLS** - the original `HLSPlayer` plan is void (ADR-012). Live view is a
 three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
 `docs/plans/P4-live-video.md`.

@@ -132,14 +132,17 @@ struct CameraDetailView: View {
 
 /// Makes its content fill the scroll container's visible height and centre within it, but only
 /// while fullscreen - inline, the picture should size to its own aspect ratio and nothing more.
+///
+/// Deliberately branchless. An `if/else` here would return two different static types, so toggling
+/// fullscreen would change structural identity and remount the subtree - including `LiveVideoView`,
+/// which hands back a stored `RTCMTLVideoView`. That is the same "one UIView, two representable
+/// hosts" hazard `body` is shaped to avoid, and it would be especially hard to notice here: the
+/// snapshot underneath is never removed, so a live view that silently dropped out would still look
+/// like a working camera.
 private struct FullscreenFill: ViewModifier {
     let isActive: Bool
 
     func body(content: Content) -> some View {
-        if isActive {
-            content.containerRelativeFrame(.vertical, alignment: .center)
-        } else {
-            content
-        }
+        content.containerRelativeFrame(isActive ? .vertical : [], alignment: .center)
     }
 }
