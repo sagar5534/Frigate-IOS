@@ -458,18 +458,33 @@ target only. Precondition checks are **done**: it embeds and links under Xcode 2
 slice carries both x86_64 and arm64, and the shipping cost is 12MB on the arm64 release slice (see
 `LEARNINGS.md` - the widely quoted ~30MB is a Debug simulator measurement).
 
-`WebRTCLivePlayer` conforms to `LivePlayer`: `RTCPeerConnectionFactory`, `bundlePolicy:
-.maxBundle`, the Google STUN server as fallback ICE (matching the PWA), one **video-only**
-`recvonly` transceiver, `createOffer` -> `setLocalDescription` -> hand to `WebRTCSignaling`.
-Remote track goes to `RTCMTLVideoView` behind a `UIViewRepresentable`.
+`WebRTCLivePlayer` conforms to `LivePlayer`: a process-wide `RTCPeerConnectionFactory`,
+`bundlePolicy: .maxBundle`, Unified Plan, the Google STUN server as fallback ICE (matching the PWA),
+one **video-only** `recvonly` transceiver, `offer` -> `setLocalDescription` -> `WebRTCSignaling`.
 
-Video-only is deliberate for P4: audio is out of scope, and requesting audio invites a class of
-negotiation failure (codec mismatch against cameras with no or odd audio) for a track we would
-discard. Adding it later is one transceiver.
+Video-only is deliberate: audio is out of P4's scope, and *requesting* it invites a class of
+negotiation failure (cameras with no audio or an odd codec) for a track we would discard. Adding it
+later is that one transceiver.
 
-`PeerConnectionObserver` (nonisolated) translates delegate callbacks into main-actor events;
-`RTCIceConnectionState`/`RTCPeerConnectionState` map onto `LivePlayerState`, with `.failed`/
-`.disconnected` distinguishing `iceFailed` from `connectionLost`.
+Under Unified Plan the `recvonly` transceiver's receiver already carries its track, so the renderer
+attaches immediately rather than waiting on a delegate callback - the same thing the PWA does with
+`pc.addTransceiver(kind, {direction:'recvonly'}).receiver.track`.
+
+`PeerConnectionObserver` (nonisolated, as the project's MainActor-by-default demands) translates
+delegate callbacks into an **ordered `AsyncStream`** - not `Task { @MainActor in … }` per callback,
+because independent tasks have no ordering guarantee and candidates delivered out of order relative
+to state transitions would be a load-only bug. `RTCPeerConnectionState` maps onto `LivePlayerState`,
+with `hasPlayed` deciding whether `.failed` means `.iceFailed` (never connected - port 8555) or
+`.connectionLost` (connected then dropped).
+
+Every post-start transition goes through a `transition(to:)` guard that drops updates on a stopped
+player: `stop()` cancels the connect task, but cancellation is cooperative, so a task parked on an
+`await` can otherwise land a late `.failed` on a stream nobody is watching.
+
+**Not verified end to end.** The unit tests cover the factory's rung selection and the lifecycle
+contract (`stop()` before `start()`, repeated `stop()`, idempotent `start()`, no re-notification on
+an unchanged state). C3's actual milestone - a moving picture - needs the real server, and the C2
+gate above is still unrun.
 
 ## C4 - Wire into camera detail (SUMMARY)
 

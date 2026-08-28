@@ -63,8 +63,8 @@ struct LivePlayerFactory {
     /// One rung. `nil` means "this build has no implementation for that tier", not a failure.
     private func makePlayer(for transport: LiveTransport, client: FrigateClient) -> (any LivePlayer)? {
         switch transport {
-        case .webrtc:
-            return nil  // C3: WebRTCLivePlayer(streamName:client:)
+        case .webrtc(let streamName):
+            return WebRTCLivePlayer(streamName: streamName, client: client)
         case .mse:
             return nil  // P4.1: MSELivePlayer
         case .mjpeg:

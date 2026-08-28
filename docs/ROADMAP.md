@@ -116,7 +116,12 @@ three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
   `auth_request` with the session cookie and is refused without it, but it is opt-in (needs
   `FRIGATE_TEST_URL`/`_USER`/`_PASSWORD`) and has not been run against the real server yet.
   Run it before starting C3 - it is what justifies adding the libwebrtc binary
-- [ ] C3 - WebRTC dependency (`stasel/WebRTC`, pinned) + `WebRTCLivePlayer` + `LiveVideoView`
+- [x] C3 - WebRTC dependency + player - `stasel/WebRTC` pinned at 151.0.0 (12MB on the arm64
+  release slice, not the ~30MB the plan assumed); `PeerConnectionObserver` bridges libwebrtc's
+  delegate onto an ordered `AsyncStream`; `WebRTCLivePlayer` does recvonly-video negotiation and
+  maps connection state onto `LivePlayerState`; `LiveVideoView` hosts `RTCMTLVideoView`.
+  166 tests. **Code only: C3's real milestone - a moving picture from a real camera - is unmet,
+  because the C2 gate has still not been run**
 - [ ] C4 - Wire into camera detail: snapshot until first frame, fullscreen, connecting/stalled/
   failed states, snapshot poll stops once live is playing
 - [ ] C5 - Reconnect, teardown, and an actionable `iceFailed` message (no fallback tier exists yet)
