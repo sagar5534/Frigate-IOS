@@ -41,6 +41,8 @@ final class LiveCameraModel {
         /// After this many consecutive automatic attempts, stop and wait for the user. Retrying
         /// forever on a camera nobody is looking at is just battery.
         var maximumAttempts = 5
+        /// How long a pre-retry session refresh may take before the retry goes ahead without it.
+        var sessionRefreshTimeout: Duration = .seconds(5)
     }
 
     init(
@@ -179,7 +181,7 @@ final class LiveCameraModel {
             // retry so a stale cookie self-heals instead of burning the whole budget on a wrong
             // diagnosis.
             if isFirstAttempt, error == .signalingFailed {
-                await self.client.refreshSession()
+                await self.refreshSessionBounded()
             }
             guard !Task.isCancelled else { return }
             self.reconnectTask = nil
@@ -194,6 +196,22 @@ final class LiveCameraModel {
             self.reconnectAttempt = attempt
             self.hasEverPlayed = played
             self.start()
+        }
+    }
+
+    /// A session refresh that cannot hold the reconnect hostage.
+    ///
+    /// `refreshSession()` is an ordinary HTTP round trip on a session using URLSession's 60s
+    /// default timeout. Unbounded, an unreachable server would park the reconnect task for a full
+    /// minute - and because `isAwaitingManualRetry` is false while that task exists, the user would
+    /// stare at a spinner with no Try Again button and no way out. The refresh is best-effort, so
+    /// giving up on it early costs nothing: the retry proceeds either way.
+    private func refreshSessionBounded() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [client] in await client.refreshSession() }
+            group.addTask { [policy] in try? await Task.sleep(for: policy.sessionRefreshTimeout) }
+            await group.next()
+            group.cancelAll()
         }
     }
 

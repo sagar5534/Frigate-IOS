@@ -11,7 +11,6 @@ actor FakeSignalingChannel: SignalingChannel {
     private let stream: AsyncStream<String>
     private let continuation: AsyncStream<String>.Continuation
     private(set) var sent: [String] = []
-    private(set) var isClosed = false
 
     init() {
         let (stream, continuation) = AsyncStream<String>.makeStream()
@@ -30,7 +29,6 @@ actor FakeSignalingChannel: SignalingChannel {
     }
 
     func close() {
-        isClosed = true
         continuation.finish()
     }
 

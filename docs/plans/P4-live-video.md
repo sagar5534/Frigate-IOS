@@ -492,10 +492,11 @@ Every post-start transition goes through a `transition(to:)` guard that drops up
 player: `stop()` cancels the connect task, but cancellation is cooperative, so a task parked on an
 `await` can otherwise land a late `.failed` on a stream nobody is watching.
 
-**Not verified end to end.** The unit tests cover the factory's rung selection and the lifecycle
+**Verified end to end** against the real server: a moving H.264 picture from a real camera, roughly
+two seconds to first frame. The unit tests cover the factory's rung selection, the lifecycle
 contract (`stop()` before `start()`, repeated `stop()`, idempotent `start()`, no re-notification on
-an unchanged state). C3's actual milestone - a moving picture - needs the real server, and the C2
-gate above is still unrun.
+an unchanged state), and the connection-state mapping extracted as `nextState(for:…)` - the
+decisions that choose which failure the user is shown.
 
 ## C4 - Wire into camera detail (BUILT)
 

@@ -43,6 +43,8 @@ final class WebRTCLivePlayer: LivePlayer {
     private var socket: LiveSocket?
     private var tasks: [Task<Void, Never>] = []
     private var isStarted = false
+    /// Identifies one connection attempt, so a superseded `connect()` can tell it is stale.
+    private var connectionEpoch = 0
     /// Whether media ever flowed. Decides whether a `.failed` transition means "could never reach
     /// the camera" or "reached it and lost it" - different causes, different things to tell the user.
     private var hasPlayed = false
@@ -84,8 +86,10 @@ final class WebRTCLivePlayer: LivePlayer {
     func start() {
         guard !isStarted else { return }
         isStarted = true
+        connectionEpoch += 1
+        let epoch = connectionEpoch
         state = .connecting
-        tasks.append(Task { await self.connect() })
+        tasks.append(Task { await self.connect(epoch: epoch) })
     }
 
     func stop() {
@@ -150,8 +154,16 @@ final class WebRTCLivePlayer: LivePlayer {
     /// Without this check a `stop()` mid-connect leaves an open socket and an ICE-gathering peer
     /// connection assigned to a player the model has already released, with no handle left to close
     /// them: a silent, permanent leak that repeats every time it happens.
-    private func abandonIfStopped(socket: LiveSocket?, peerConnection: RTCPeerConnection?) -> Bool {
-        guard !isStarted else { return false }
+    private func abandonIfStopped(
+        epoch: Int,
+        socket: LiveSocket?,
+        peerConnection: RTCPeerConnection?
+    ) -> Bool {
+        // Compares a generation rather than just `isStarted`, so a `stop()` immediately followed by
+        // `start()` still abandons the older attempt. `LivePlayer` documents `start()` as idempotent
+        // and the player as reusable across reconnects, and an `isStarted`-only check would let a
+        // stale in-flight `connect()` overwrite the new attempt's socket and peer connection.
+        guard !isStarted || epoch != connectionEpoch else { return false }
         LiveLog.logger.info("connect abandoned after teardown src=\(self.streamName, privacy: .public)")
         peerConnection?.close()
         if let socket {
@@ -160,15 +172,15 @@ final class WebRTCLivePlayer: LivePlayer {
         return true
     }
 
-    private func connect() async {
+    private func connect(epoch: Int) async {
         do {
             let request = try await client.webSocketRequest(for: .webrtcWebSocket(src: streamName))
-            guard !abandonIfStopped(socket: nil, peerConnection: nil) else { return }
+            guard !abandonIfStopped(epoch: epoch, socket: nil, peerConnection: nil) else { return }
             LiveLog.logger.info("opening signaling socket src=\(self.streamName, privacy: .public) url=\(request.url?.absoluteString ?? "nil", privacy: .public) hasCookie=\(request.value(forHTTPHeaderField: "Cookie") != nil, privacy: .public)")
             let socket = try await client.liveSocket(for: .webrtcWebSocket(src: streamName))
-            guard !abandonIfStopped(socket: socket, peerConnection: nil) else { return }
+            guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: nil) else { return }
             await socket.start()
-            guard !abandonIfStopped(socket: socket, peerConnection: nil) else { return }
+            guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: nil) else { return }
             self.socket = socket
             let signaling = WebRTCSignaling(channel: socket)
 
@@ -205,9 +217,9 @@ final class WebRTCLivePlayer: LivePlayer {
             tasks.append(Task { await self.applyRemoteSignaling(from: signaling, to: peerConnection) })
 
             let offer = try await peerConnection.offer(for: Self.mediaConstraints)
-            guard !abandonIfStopped(socket: socket, peerConnection: peerConnection) else { return }
+            guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: peerConnection) else { return }
             try await peerConnection.setLocalDescription(offer)
-            guard !abandonIfStopped(socket: socket, peerConnection: peerConnection) else { return }
+            guard !abandonIfStopped(epoch: epoch, socket: socket, peerConnection: peerConnection) else { return }
             try await signaling.send(.offer(sdp: offer.sdp))
             LiveLog.logger.info("offer sent src=\(self.streamName, privacy: .public)")
 
@@ -294,10 +306,10 @@ final class WebRTCLivePlayer: LivePlayer {
                 await self?.logInboundStats()
             }
         case .disconnected:
-            // Clearing the frame latch matters: if ICE recovers while the camera has stopped
-            // sending, a stale `true` would re-report `.playing` over a frozen picture.
+            // If ICE recovers while the camera has stopped sending, a stale `true` would re-report
+            // `.playing` over a frozen picture - so forget the frames we had seen.
             isConnected = false
-            hasVideoFrames = false
+            forgetVideoFrames()
         default:
             break
         }
@@ -373,6 +385,19 @@ final class WebRTCLivePlayer: LivePlayer {
         }
     }
 
+    /// Forgets that video was flowing, so the next decoded frame counts as a fresh arrival.
+    ///
+    /// **Both halves are required.** `hasVideoFrames` is only ever set from `markVideoFrameArrived`,
+    /// which the observer calls only for the *first* frame after a reset. Clearing the player's flag
+    /// without re-arming the observer therefore latches it false for the life of the player: a wifi
+    /// blip would leave "Reconnecting" sitting over moving video until the stall deadline tore down
+    /// a stream that was working perfectly. That is the third time in this phase a liveness signal
+    /// that fires once has been mistaken for one that fires continuously.
+    private func forgetVideoFrames() {
+        hasVideoFrames = false
+        frameObserver?.reset()
+    }
+
     private func markVideoFrameArrived() {
         guard !hasVideoFrames else { return }
         LiveLog.logger.info("first video frame src=\(self.streamName, privacy: .public)")
@@ -396,7 +421,8 @@ final class WebRTCLivePlayer: LivePlayer {
                 else { return }
                 if ContinuousClock.now - lastFrameAt > Self.frameWatchdogInterval {
                     LiveLog.logger.info("frames stopped src=\(self.streamName, privacy: .public)")
-                    self.hasVideoFrames = false
+                    self.frameWatchdog = nil
+                    self.forgetVideoFrames()
                     self.transition(to: .stalled)
                     return
                 }

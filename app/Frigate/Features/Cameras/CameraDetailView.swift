@@ -98,7 +98,12 @@ struct CameraDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 12))
                 .overlay(alignment: .bottomTrailing) { freshnessBadge }
                 .padding(isFullscreen ? 0 : 16)
-                .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : nil)
+                .frame(maxWidth: .infinity)
+                // Centres the video when expanded. `maxHeight: .infinity` would not: a ScrollView
+                // proposes unbounded height to its content, so the frame resolves to the content's
+                // ideal size and lays out top-aligned. `containerRelativeFrame` measures the scroll
+                // view's visible height instead, which is the thing we actually want to fill.
+                .modifier(FullscreenFill(isActive: isFullscreen))
         }
         .scrollDisabled(isFullscreen)
         .background(isFullscreen ? Color.black : Color.clear)
@@ -120,6 +125,21 @@ struct CameraDetailView: View {
         if !liveModel.isPlaying, let snapshot = snapshotModel.state.snapshot {
             SnapshotAgeBadge(capturedAt: snapshot.capturedAt)
                 .padding(8)
+        }
+    }
+}
+
+
+/// Makes its content fill the scroll container's visible height and centre within it, but only
+/// while fullscreen - inline, the picture should size to its own aspect ratio and nothing more.
+private struct FullscreenFill: ViewModifier {
+    let isActive: Bool
+
+    func body(content: Content) -> some View {
+        if isActive {
+            content.containerRelativeFrame(.vertical, alignment: .center)
+        } else {
+            content
         }
     }
 }
