@@ -1,219 +1,117 @@
-# P4 - Live Video
+# P4 - Live Video (WebRTC)
 
 ## Context
 
 P1-P3 are done: the app connects and authenticates (cookie session, silent 401 re-login), shows a
-grid of auto-refreshing camera snapshots, and browses review segments with filters, detail,
-mark-reviewed, pagination, and clip playback. `FrigateClient` (actor) is the single HTTP entry
-point; every route shape the app needs (JSON, JPEG, WebP, HLS VOD manifest) already flows through
-its auth/retry path via `Endpoint.basePath` (ADR-010).
+list of auto-refreshing camera snapshots with a Recent Activity strip, and browses review segments
+with filters, detail, mark-reviewed, pagination, and clip playback. `FrigateClient` (actor) is the
+single HTTP entry point; every route shape the app needs (JSON, JPEG, WebP, HLS VOD manifest)
+already flows through its auth/retry path via `Endpoint.basePath` (ADR-010).
 
 P4 is the roadmap milestone _"watch a live camera."_ Today the camera detail screen is a snapshot
-polled every 5s - P4 replaces that with actual moving video for the focused camera.
+polled every 5s; P4 replaces that with moving video for the focused camera.
 
 Branch: `P4-Live-Video` (off `main`).
 
 ---
 
-## The blocking finding: Frigate has no live HLS
+## Scope: this phase is WebRTC only
 
-The roadmap and `CLAUDE.md` both assume v1 live = **`HLSPlayer` (AVPlayer + HLS)**, with WebRTC
-slotting in later. **That source does not exist.** Read directly from `~/Documents/frigate`
-(commit `65af0b135`), the only live transports a Frigate server exposes are:
+**Frigate exposes no live HLS.** The original plan ("ship `HLSPlayer`, WebRTC later") is void; the
+finding and the full evidence live in `docs/DECISIONS.md` **ADR-012**. Live view is instead a
+three-tier ladder, and **each tier is its own phase**:
 
-| Transport | URL | Auth | Native iOS story |
-|---|---|---|---|
-| **WebRTC (go2rtc)** | `ws(s)://{base}/live/webrtc/api/ws?src={stream}` (signaling) | nginx `auth_request` (cookie) | Needs a WebRTC binary dependency; rendering is free. |
-| **MSE (go2rtc)** | `ws(s)://{base}/live/mse/api/ws?src={stream}` | same | fMP4 over WebSocket. No MSE API on iOS - the bytes must be demuxed by hand and fed to `AVSampleBufferDisplayLayer`. |
-| **jsmpeg** | `ws(s)://{base}/live/jsmpeg/{camera}` | same | MPEG1 over WebSocket; no usable hardware decode path. Dead end. |
-| **MJPEG** | `GET /api/{camera}?fps=&height=&bbox=&timestamp=…` | cookie (normal API path) | `multipart/x-mixed-replace` JPEG stream. Trivial to consume; not real video. |
-
-`nginx.conf` proxies exactly four go2rtc/live locations (`/live/jsmpeg/`, `/live/mse/api/ws`,
-`/live/webrtc/api/ws`, `/live/webrtc/webrtc.html`) plus `POST /api/go2rtc/webrtc`. There is **no**
-generic go2rtc proxy, so go2rtc's own `stream.m3u8` and `stream.mp4` outputs are unreachable;
-go2rtc's API port (1984) is bound to `127.0.0.1` inside the container and is not part of a
-supported deployment. `/vod/` HLS is **recordings only** (nginx-vod-module over finalized recording
-files) - that is what P3's clip playback uses, and it is not live.
-
-Frigate's own PWA confirms the shape: it picks `mse` when the camera is restreamed and the browser
-has MediaSource, `webrtc` when restreamed without MediaSource, and falls back to `jsmpeg` when the
-camera is **not** restreamed (`web/src/hooks/use-camera-live-mode.ts`). It never uses HLS for live.
-
-**So P4's real decision is which transport becomes the v1 `LivePlayer`.** The `LivePlayer`
-interface itself - the part `CLAUDE.md` actually cares about - is unaffected: it stays a thin seam
-so other players drop in later.
-
----
-
-## Transport decision
-
-### The candidates
-
-**A. MSE over WebSocket -> `AVSampleBufferDisplayLayer`.** Connect the WebSocket, send
-`{"type":"mse","value":"<codec list>"}`, receive a text ack then binary fMP4 (init segment, then
-`moof`+`mdat` fragments), parse the boxes, enqueue `CMSampleBuffer`s. Zero dependencies, rides the
-same HTTPS origin and cookie auth as everything else, so it works for **any user who can log in**.
-Cost: we write the fMP4 demuxer ourselves (~400-600 lines).
-
-**B. WebRTC via go2rtc.** Signaling over `ws(s)://{base}/live/webrtc/api/ws?src={stream}`
-(cookie-authed by nginx): `recvonly` transceivers, `createOffer`, send
-`{"type":"webrtc/offer","value":sdp}`, receive `{"type":"webrtc/answer","value":sdp}` plus
-`{"type":"webrtc/candidate","value":…}` trickle both ways. Media is a separate connection on
-**port 8555**. Sub-second latency, audio, and two-way talk later; rendering is handled by the
-library.
-
-**C. MJPEG.** `GET /api/{camera}?fps=5&height=720` streams JPEGs over the existing `FrigateClient`
-path - about 150 lines, works on every server regardless of go2rtc config or ports. But the frames
-come from the low-res **detect** stream, Frigate re-encodes every frame per client (`cv2.resize` +
-`imencode`, `media.py:109`), and there is no audio. Not a primary experience - a real fallback.
-
-### A vs B: the work
-
-**On app code, B wins outright:**
-
-| | A - MSE | B - WebRTC |
+| Phase | Tier | Status |
 |---|---|---|
-| Transport | WebSocket, ~100 lines | signaling over WebSocket, ~80 lines |
-| Decode/render | **fMP4 demuxer ~400-600 lines** + `AVSampleBufferDisplayLayer` ~100 | none - `RTCMTLVideoView` renders the track |
-| Dependencies | none | `WebRTC.xcframework` (~30MB binary) |
-| Total app code | ~600-800 lines | **~200-300 lines** |
-| Latency | ~1-2s | ~0.2-0.5s |
-| Audio / two-way talk | no | yes / possible later |
+| **P4 (this plan)** | WebRTC via go2rtc | building now |
+| P4.1 | MSE (fMP4 over WebSocket) | deferred, demand-driven |
+| P4.2 | MJPEG (`multipart/x-mixed-replace`) | deferred, demand-driven |
 
-### Is there a library that removes A's demuxer work?
+P4 builds **only the WebRTC rung**, but it builds **the whole ladder's seam**, so P4.1 and P4.2
+each land as one new `LivePlayer` conformer plus one case in a factory, with no call-site changes.
+That seam is a first-class deliverable of this phase, not a side effect.
 
-Checked, because "don't hand-build media plumbing" is the right instinct. **There isn't a good
-one:**
-
-- **No maintained Swift package consumes a live fMP4 byte stream.** The closest hit,
-  [`sbader/FragmentedMP4Parser`](https://github.com/sbader/FragmentedMP4Parser), is a
-  file-oriented tool for generating HLS playlists, still on pre-Swift-4 `Package.swift` syntax at
-  `majorVersion: 0`. Not a streaming demuxer, not maintained.
-- **FFmpegKit is retired.** Archived January 2025; binaries pulled from CocoaPods/Maven/npm in
-  April 2025. Continuations exist (`FFmpegKitNext`, `kewlbear/FFmpeg-iOS`), and the popular SPM
-  fork `ffmpeg-kit-spm` retired along with upstream. Taking FFmpeg means a 30-80MB binary plus
-  LGPL/GPL compliance work, on a dependency whose upstream just died - to avoid ~500 lines we
-  could own outright.
-- **VLCKit / mpv can't help.** They need a URL; neither speaks WebSocket. They could play go2rtc's
-  RTSP on port 8554, but that has WebRTC's exposed-port problem *and* a ~100MB binary.
-- **HaishinKit** is actively maintained and does contain ISOBMFF code, but it is an RTMP/SRT
-  *publishing* library - its MP4 support is file reading and HLS writing, not consuming a live
-  fMP4 socket. We would bend it sideways and still write the glue.
-
-**The asymmetry is the finding:** the one transport with a well-maintained, production-grade iOS
-library is **WebRTC** (LiveKit's `WebRTC-SDK` / `stasel/WebRTC`, rebuilt regularly and shipped in
-production). If we don't want to hand-build, the coherent answer is WebRTC - not MSE-with-a-library,
-because that library doesn't exist.
-
-For the record, A's "hand-built" part is smaller than it sounds: we would not write a decoder.
-VideoToolbox decodes, and Apple gives us `CMVideoFormatDescriptionCreateFromH264ParameterSets` /
-`…FromHEVCParameterSets`. We would write a reader for ~8 box types (`ftyp`, `moov`→`mdhd` +
-`stsd`→`avcC`/`hvcC`, `moof`→`tfhd`/`tfdt`/`trun`, `mdat`), fully specified by ISO 14496-12 and
-testable offline against captured bytes. Tedious, not deep - but still ~500 lines of media
-plumbing we'd maintain forever.
-
-### What can go wrong with WebRTC
-
-All from Frigate's own docs (`docs/docs/configuration/live.md`,
-`docs/docs/frigate/network_requirements.md`), not speculation:
-
-1. **It needs server-side setup the app cannot perform.** Media rides a separate TCP/UDP connection
-   on **port 8555**. External access requires forwarding 8555 (both protocols) on the user's
-   router. Internal/LAN access additionally requires hand-editing go2rtc's YAML with a
-   `webrtc: candidates:` list containing the machine's LAN IP. Docker installs need 8555 mapped in
-   `docker-compose.yml` (or `network: host`). Tailscale users must add their Tailscale IP as a
-   candidate. That is router configuration plus YAML editing - the thing this project's guiding
-   priority ("move fast, keep setup seamless") and its "config lives in the app UI, not YAML" rule
-   exist to avoid.
-2. **The media path bypasses the tunnel that already works.** Everything the app does today goes
-   through one authenticated HTTPS origin, which is what makes remote access work for users behind
-   Cloudflare Tunnel, Nginx Proxy Manager, Tailscale, or a plain reverse proxy. WebRTC's media does
-   not use that origin. Cloudflare Tunnel carries neither UDP nor arbitrary TCP ports, so those
-   users get a permanent spinner unless they separately expose 8555.
-3. **Weaker auth story.** The signaling WS/POST is cookie-gated by nginx `auth_request`
-   (`frigate/api/auth.py:1144`); the media connection to 8555 is go2rtc's own port, gated only by
-   the ICE credentials in the SDP.
-4. **Failures are invisible and un-actionable.** WebRTC fails in ICE, and the user sees
-   "connecting…" forever. Saying anything useful means building candidate diagnostics, and the fix
-   is always "change your router or your YAML." MSE failures are HTTP failures the existing
-   `APIError` model already describes.
-5. **Dependency cadence.** Google publishes no official Swift package for libwebrtc; usable SPM
-   distributions are community rebuilds. A ~30MB binary dominates app size and ties releases to
-   someone else's rebuild schedule each Xcode/iOS cycle.
-6. **HEVC over WebRTC is spottier** than over MSE, and the PWA's player falls back to Google's
-   public STUN server (internet required) when no local candidate is configured.
-
-**And in fairness, MSE's own downsides:** ~1-2s latency instead of sub-second; no audio, ever,
-without more demuxer work; a hand-written demuxer is a real bug surface on unusual streams; and it
-still needs a go2rtc restream configured, or we're on MJPEG anyway.
-
-### Decision: WebRTC primary, MJPEG fallback, MSE deferred
-
-Objection #1/#2 above - reach - is the only serious argument against WebRTC, and it is answered
-**without** the demuxer: pair WebRTC with the **MJPEG fallback (C)**, which needs no ports, no
-YAML, and no go2rtc at all. Users whose network cooperates get the best live experience Frigate can
-produce; everyone else gets a working, if soft, picture instead of a spinner. That covers both
-reach and quality for ~350-450 lines total and one maintained dependency - versus ~600-800 lines of
-hand-written demuxer that still tops out at 1-2s latency with no audio.
-
-Supporting facts for this specific deployment: `frigate.sagarp.ca:8555/tcp` answers from the public
-internet today, and go2rtc supports WebRTC over TCP - so the primary path should work on the real
-server from day one, and P4 can be verified end-to-end rather than reasoned about (the mistake P3
-made with clip playback).
-
-**MSE is deferred, not discarded.** It stays the documented tier-2 upgrade: if MJPEG-tier users
-turn out to be common (telemetry we don't have yet, or the first external testers), the demuxer is
-a self-contained chunk that slots into the same `LivePlayer` seam without touching the UI. Building
-it now would be paying ~500 lines of permanent maintenance for a population we cannot yet measure.
-
-### Roadmap consequence
-
-The P4 bullet "`HLSPlayer` implementation (AVPlayer + HLS)" becomes "`WebRTCLivePlayer` (go2rtc
-signaling + `RTCMTLVideoView`)", with an added MJPEG-fallback bullet. `CLAUDE.md` needs two
-amendments: the "ship `HLSPlayer` only for v1, `WebRTCPlayer` later" rule is inverted by this
-finding (there is no HLS to ship), and "low-res HLS for the grid" becomes "snapshots for the grid"
-- the grid stays on the P2 snapshot loop and live runs only on the focused camera, which preserves
-the actual intent of that rule ("never WebRTC a grid").
+The consequence to hold onto: until P4.1/P4.2 exist, a user whose network cannot carry WebRTC's
+media path has **no live view at all**. So the failure states in C5 are not polish - they are the
+difference between "your router needs port 8555 forwarded" and an infinite spinner.
 
 ---
 
-## Verified Frigate facts (read from `~/Documents/frigate`)
+## Verified Frigate facts (read from `~/Documents/frigate`, go2rtc v1.9.14)
 
 **Is a camera restreamed?** `/api/config` carries `go2rtc.streams` (dict of stream name -> source)
 and per-camera `live.streams` (dict of friendly label -> go2rtc stream name,
-`frigate/config/camera/live.py:8`). The PWA treats a camera as restreamed when the **first value**
-of `cameras[name].live.streams` is a key of `go2rtc.streams`, and uses that stream name as `src`.
-Unmapped -> not restreamed -> jsmpeg in the PWA, MJPEG for us. Docs confirm: _"If your go2rtc
-stream names don't match your Frigate camera name, you must map them with the `live -> streams`
-config; otherwise the UI falls back to the video-only jsmpeg player."_
+`frigate/config/camera/live.py`). The PWA treats a camera as restreamed when the **first value** of
+`cameras[name].live.streams` is a key of `go2rtc.streams`, and uses that value as `src`
+(`web/src/hooks/use-camera-live-mode.ts`, `web/src/components/player/LivePlayer.tsx:264`).
+
+**`live.streams` is never empty in the response.** `frigate/config/config.py:990-991` fills it with
+`{name: name}` when the user did not configure it, so the client always sees at least one entry.
+That removes the "camera name as implicit default" special case the earlier draft of this plan
+carried. Note also that `verify_valid_live_stream_names` (`config.py:265`) *returns* rather than
+raises its `ValueError`, so a `live.streams` value naming a nonexistent go2rtc stream reaches us
+intact - the membership check is genuinely load-bearing, not belt-and-braces.
+
+**go2rtc stream values are string-or-array.** `go2rtc: streams: front: [url1, url2]` is a normal
+config. Only the **keys** matter to us, so decode them without touching the values.
 
 **WebRTC signaling** (`web/src/components/player/WebRTCPlayer.tsx`):
 1. Open `ws(s)://{base}/live/webrtc/api/ws?src={streamName}` (cookie-authed by nginx).
-2. Add `recvonly` transceivers for video (and audio), `createOffer()`, `setLocalDescription`.
+2. Add `recvonly` transceivers, `createOffer()`, `setLocalDescription`.
 3. Send `{"type":"webrtc/offer","value":<sdp>}`.
 4. Receive `{"type":"webrtc/answer","value":<sdp>}` -> `setRemoteDescription`; exchange
-   `{"type":"webrtc/candidate","value":<candidate>}` both ways (remote candidates use `sdpMid: "0"`).
-5. The PWA also configures `stun:stun.l.google.com:19302` as a fallback ICE server.
+   `{"type":"webrtc/candidate","value":<candidate>}` both ways. **Remote candidates arrive with no
+   sdpMid/sdpMLineIndex - the PWA supplies `sdpMid: "0"` itself.**
+5. The PWA configures `bundlePolicy: max-bundle` and `stun:stun.l.google.com:19302` as a fallback
+   ICE server, and treats "no frame within 5s" as a startup failure, "no progress for 3s" as a
+   stall.
 
-There is also a non-trickle `POST /api/go2rtc/webrtc?src={stream}` (used by the HA integration) if
-the WS path proves awkward - same auth, one round trip, at the cost of waiting for full ICE
-gathering.
-
-**MJPEG fallback** - `GET /api/{camera_name}` (`frigate/api/media.py:77`), params `fps` (default 3),
-`height` (default 360), plus optional `bbox`/`timestamp`/`zones`/`mask`/`motion`/`regions`
-overlays. Returns `multipart/x-mixed-replace;boundary=frame`.
+There is also a non-trickle `POST /api/go2rtc/webrtc?src={stream}` (POST-only in nginx, used by the
+HA integration) if the WS path proves awkward: same auth, one round trip, at the cost of waiting
+for full ICE gathering.
 
 **Auth:** nginx gates `/live/webrtc/api/ws` with the same `auth_request` used by `/clips/` and
 `/vod/`, so the handshake needs the `frigate_token` cookie. Creating the task from
-`FrigateClient`'s own `URLSession` gets both the private cookie jar and the
-`InsecureTrustDelegate`; the cookie is also set explicitly on the handshake request as a belt.
-Scheme maps `http->ws`, `https->wss`.
+`FrigateClient`'s own `URLSession` gets both the shared cookie jar and the `InsecureTrustDelegate`;
+the cookie is also set explicitly on the handshake request as a belt. Scheme maps `http->ws`,
+`https->wss`.
 
-**MSE handshake** (recorded here so the deferred tier-2 work doesn't need re-research): open
-`/live/mse/api/ws?src={stream}`, send `{"type":"mse","value":"<comma-separated codecs>"}`, receive
-a text ack naming the negotiated codecs, then binary fMP4 - init segment first, then `moof`+`mdat`
-pairs. No ack within ~3s is the PWA's cue to fall back. MSE requires H.264/H.265 video and
-PCMA/PCMU or AAC audio.
+**Media path:** a separate TCP/UDP connection on **port 8555**, not the HTTPS origin. External
+access needs 8555 forwarded; LAN access needs the machine's IP in go2rtc's `webrtc: candidates:`.
+`create_config.py` defaults candidates to `["stun:8555"]` plus an add-on-discovered internal
+candidate when present. For this deployment, `frigate.sagarp.ca:8555/tcp` answers from the public
+internet today and go2rtc supports WebRTC over TCP, so the primary path should work on the real
+server from day one - **which is why every chunk below has a real-server milestone, not just a
+green test.** P3's clip playback shipped on reasoning alone; this phase does not repeat that.
+
+---
+
+## Dependency: one library, and only one
+
+**`stasel/WebRTC`, pinned to an exact version** (151.0.0 at time of writing).
+
+```swift
+.package(url: "https://github.com/stasel/WebRTC.git", exact: "151.0.0")
+```
+
+Unmodified upstream libwebrtc, built in the open via GitHub Actions, distributed as a dynamic
+xcframework, iOS 12+ (we target 26.5). Chosen over LiveKit's `webrtc-xcframework` (137.7151.x),
+which renames the module to `LiveKitWebRTC` and prefixes every Objective-C symbol with `LK` for
+vendoring inside their own SDK, and tracks a considerably older libwebrtc. LiveKit's stays the
+documented fallback if stasel's distribution ever stalls.
+
+**Why nothing else is worth taking**, having looked:
+
+- **A full WebRTC SDK (LiveKit, Daily, Agora) cannot help.** Their value is *their own* signaling
+  and server. go2rtc's signaling is its own small protocol; no Swift client for it exists. We write
+  ~100 lines of JSON-over-WebSocket either way, and taking an SDK would mean fighting its
+  connection model to do it.
+- **A WebSocket library (Starscream, etc.) would be a downgrade.** `URLSessionWebSocketTask` is the
+  right choice *specifically* because a task created from `FrigateClient`'s session inherits the
+  shared cookie jar and the `InsecureTrustDelegate`. A third-party socket throws both away and we
+  would re-implement cookie forwarding and self-signed-cert trust by hand.
+- Pin exactly. These are prebuilt binaries; a surprise minor bump can break the build in ways we
+  cannot patch.
 
 ---
 
@@ -225,241 +123,418 @@ New code lands under `app/Frigate/Features/Live/`, plus additive seams on `Friga
 ```
 app/Frigate/
   Models/
-    FrigateConfig.swift  (edit)  + go2rtc.streams, cameras[].live.streams          [C1]
-    LiveStreamSource.swift       camera -> (transport, stream name) resolution      [C1]
+    FrigateConfig.swift   (edit)  + go2rtc.streams keys, cameras[].live.streams        [C1]
+    LiveTransport.swift           the full three-tier ladder + resolution              [C1]
   Networking/
-    Endpoint.swift       (edit)  + .webrtcWebSocket(src:), .mjpegStream(camera:…)   [C1]
-    FrigateClient.swift  (edit)  + webSocketURL(for:), liveSocket(for:)             [C1]
+    Endpoint.swift        (edit)  + .webrtcWebSocket(src:)                             [C1]
+    FrigateClient.swift   (edit)  + webSocketURL(for:), liveSocket(for:)               [C1]
+    LiveSocket.swift              actor over URLSessionWebSocketTask                   [C1]
   Features/Live/
-    LivePlayer.swift             protocol + LivePlayerState + errors                [C1]
-    WebRTCSignaling.swift        go2rtc offer/answer/candidate over the socket      [C2]
-    WebRTCLivePlayer.swift       peer connection lifecycle + track handoff          [C3]
-    LiveVideoView.swift          UIViewRepresentable over RTCMTLVideoView           [C3]
-    LiveCameraView.swift         still -> live swap, controls, error states         [C4]
-    MJPEGLivePlayer.swift        multipart JPEG fallback player                     [C6]
+    LivePlayer.swift              protocol + state + errors + LivePlayerFactory        [C1]
+    SignalingChannel.swift        protocol seam LiveSocket conforms to (testability)   [C1]
+    WebRTCSignaling.swift         go2rtc offer/answer/candidate state machine          [C2]
+    WebRTCLivePlayer.swift        peer connection lifecycle + track handoff            [C3]
+    PeerConnectionObserver.swift  nonisolated delegate -> main-actor events            [C3]
+    LiveVideoView.swift           UIViewRepresentable over RTCMTLVideoView             [C3]
+    LiveCameraView.swift          still -> live swap, fullscreen, error states         [C4]
+    LiveCameraModel.swift         owns the ladder, the player, and teardown            [C4]
 ```
 
-**`LivePlayer` (the seam `CLAUDE.md` mandates).** A protocol, not a class hierarchy:
+### The seam (built in P4, consumed by P4.1 and P4.2)
+
+**`LivePlayer`** - a protocol, not a class hierarchy. Each player owns its own render surface,
+because the surfaces are genuinely different (`RTCMTLVideoView` vs `AVSampleBufferDisplayLayer` vs
+an `Image`), and that keeps Metal-layer details out of SwiftUI call sites.
 
 ```swift
 @MainActor
 protocol LivePlayer: AnyObject {
-    var state: LivePlayerState { get }   // .idle .connecting .playing .stalled .failed(reason)
-    func start()                          // idempotent
-    func stop()                           // full teardown; safe to call twice
-    var view: AnyView { get }             // player-owned render surface
+    var state: LivePlayerState { get }
+    var transport: LiveTransport { get }   // what tier this actually is, for the UI to say so
+    func start()                            // idempotent
+    func stop()                             // full teardown; safe to call twice
+    var view: AnyView { get }
 }
 ```
-`WebRTCLivePlayer` is the v1 conformer, `MJPEGLivePlayer` the fallback, and a future `MSELivePlayer`
-slots in without touching call sites. The UI only ever sees `LivePlayer` + `LivePlayerState`. Each
-player owns its own render surface because the surfaces are genuinely different (`RTCMTLVideoView`
-vs an `Image`), which keeps the protocol from leaking Metal-layer details into SwiftUI code.
 
-**Dependency.** One SPM package for libwebrtc. Prefer LiveKit's `WebRTC-SDK` (actively rebuilt,
-production use, xcframework distribution); `stasel/WebRTC` is the fallback choice. Pin an exact
-version - these are prebuilt binaries and a surprise bump can break the build in ways we can't
-patch.
-
-**Concurrency.** The WebSocket receive loop lives in an actor (`LiveSocket`) so the non-`Sendable`
-`URLSessionWebSocketTask` never crosses isolation boundaries; signaling messages reach the
-`@MainActor` player through an `AsyncStream`. `RTCPeerConnection` delegate callbacks arrive on
-WebRTC's own threads and are hopped to the main actor explicitly.
-
-**Grid stays snapshots.** No live streams in `CameraGridView` - the "never WebRTC a grid" rule,
-already satisfied by the P2 snapshot loop.
-
----
-
-## Chunk map
-
-- **C1 - `LivePlayer` seam + live source resolution** (roadmap: "Define the `LivePlayer`
-  interface"). Config parsing for `go2rtc.streams` / `live.streams`, the `LiveStreamSource`
-  decision (WebRTC with a stream name / MJPEG fallback), the `LivePlayer` protocol + state enum,
-  WebSocket URL and cookie plumbing on `FrigateClient`. No video yet. **Detailed below.**
-- **C2 - WebRTC dependency + signaling.** Add the SPM package (pinned). `WebRTCSignaling`: connect
-  the socket, exchange `webrtc/offer` -> `webrtc/answer`, trickle candidates both ways, surface
-  connection-state transitions. Milestone: against the real server, a peer connection reaches
-  `connected` and reports a selected candidate pair - proven by a unit test over a scripted
-  message sequence plus a logged live run.
-- **C3 - `WebRTCLivePlayer` + `LiveVideoView`.** `recvonly` transceivers, remote track handoff to
-  `RTCMTLVideoView`, `LivePlayer` conformance, ICE/connection state mapped onto `LivePlayerState`.
-  Milestone: a moving picture from a real camera on screen.
-- **C4 - Wire into camera detail.** `LiveCameraView` shows the existing snapshot until the first
-  frame renders (Frigate's own UX), then swaps to live; aspect-ratio handling, tap-to-fullscreen,
-  and clear states for connecting / stalled / failed / unavailable. The snapshot poll stops once
-  live is playing. Milestone: open a camera, watch it live.
-- **C5 - Reconnect, fallback, teardown.** Exponential backoff on connection loss; an ICE-failure
-  timeout that gives up and **falls back to the MJPEG player** rather than spinning forever
-  (this is the chunk that makes objection #4 above survivable); teardown on `.onDisappear` /
-  `scenePhase` background / tab switch; leak check (peer connection closed, socket closed, tasks
-  cancelled). Milestone: kill wifi mid-stream and it recovers; block 8555 and it degrades to MJPEG
-  with an explanatory note instead of hanging.
-- **C6 - MJPEG fallback player.** `MJPEGLivePlayer` parses the `multipart/x-mixed-replace` boundary
-  stream off a `URLSession.bytes` sequence and publishes frames through the same `LivePlayer` seam.
-  Used for non-restreamed cameras and as C5's degradation target. Milestone: a camera with no
-  go2rtc restream still shows motion.
-
-_P4 milestone (all chunks): open a camera and watch it live, with automatic recovery after a
-network blip and a graceful degradation path when WebRTC can't connect._
-
-**Deferred to a later phase (documented, not built):** `MSELivePlayer` - the fMP4 demuxer described
-above - as a tier-2 quality upgrade over MJPEG for users whose networks can't carry WebRTC. Audio
-and two-way talk also stay out of P4.
-
----
-
-## C1 - `LivePlayer` seam + live source resolution (FULL DETAIL)
-
-No dependency yet, no video. Config + models + networking seams only, all unit-testable through the
-existing `MockURLProtocol`.
-
-### `Models/FrigateConfig.swift` (edit)
-
-Two additive fields, both lenient (older/partial payloads must still decode - existing tests
-construct configs without them):
+**`LiveTransport`** enumerates **all three tiers now**, even though only one is buildable in P4.
+This is the point of the seam: the ladder is data, not a hardcoded choice.
 
 ```swift
-let go2rtc: Go2RTCInfo          // decodeIfPresent -> .init(streams: [:])
-struct Go2RTCInfo: Decodable, Equatable, Sendable {
-    /// Only the KEYS matter. Values are string-or-array-of-string in real configs, so decode
-    /// them as an opaque ignored value rather than trying to model go2rtc's source syntax.
-    let streamNames: Set<String>
+nonisolated enum LiveTransport: Equatable, Sendable {
+    case webrtc(streamName: String)   // P4
+    case mse(streamName: String)      // P4.1
+    case mjpeg(camera: String)        // P4.2
+}
+
+nonisolated enum LiveStreamSource {
+    /// Ordered preference ladder for a camera, best rung first.
+    /// Restreamed  -> [.webrtc(s), .mse(s), .mjpeg(camera)]
+    /// Unrestreamed-> [.mjpeg(camera)]
+    static func ladder(camera: String, config: FrigateConfig) -> [LiveTransport]
 }
 ```
-and inside `CameraConfig`:
-```swift
-let live: LiveInfo              // decodeIfPresent -> .init(streams: [])
-struct LiveInfo: Decodable, Equatable, Sendable {
-    let streams: [(label: String, name: String)]   // ordered; see gotcha below
-}
-```
-**Ordering gotcha:** the PWA uses the *first* entry of `live.streams`, but Swift dictionaries are
-unordered - JSON object order is lost through `[String: String]`. Decode through a custom
-`init(from:)` that preserves declaration order, so "first stream" is faithful to the user's config
-file rather than arbitrary. (`CameraConfig` already has a custom `init(from:)` to extend.)
 
-### `Models/LiveStreamSource.swift` (new)
-
-Pure decision logic - the one place that answers "how do I watch this camera?":
+**`LivePlayerFactory`** builds the best rung that has an implementation *in this build*, skipping
+the rest, and returns `nil` when none do (the UI then keeps the snapshot and says live is
+unavailable for this camera):
 
 ```swift
-nonisolated enum LiveStreamSource: Equatable, Sendable {
-    case webrtc(streamName: String)   // camera is restreamed through go2rtc
-    case mjpeg(camera: String)        // no restream; low-res detect stream (C6)
-
-    /// Mirrors the PWA: first configured live stream that is a known go2rtc stream wins.
-    static func resolve(camera: String, config: FrigateConfig) -> LiveStreamSource
+@MainActor
+struct LivePlayerFactory {
+    func makePlayer(for ladder: [LiveTransport], client: FrigateClient) -> LivePlayer?
 }
 ```
-Rules, matching `use-camera-live-mode.ts`: take the first `live.streams` value; if it is a key of
-`go2rtc.streams` -> `.webrtc(streamName:)`; otherwise `.mjpeg(camera:)`. A camera whose name is
-itself a go2rtc stream key but has no `live.streams` mapping also resolves to `.webrtc` (common
-single-stream setup, matching the PWA's `?? cameraName` default).
 
-### `Features/Live/LivePlayer.swift` (new)
+In P4 it knows `.webrtc` and returns `nil` for `.mse`/`.mjpeg`. P4.1 and P4.2 each add exactly one
+case. **Automatic escalation on failure - try the next rung when this one dies - is deliberately
+deferred to P4.2.** With one implemented rung there is nothing to escalate to, and a state machine
+with no second rung to test against is speculation. Because the ladder is already an ordered list,
+adding escalation later is additive to `LiveCameraModel`, not a redesign.
 
-The protocol above plus:
+**States and errors:**
+
 ```swift
 nonisolated enum LivePlayerState: Equatable, Sendable {
     case idle, connecting, playing, stalled
     case failed(LivePlayerError)
 }
 nonisolated enum LivePlayerError: Equatable, Sendable {
-    case signalingFailed          // couldn't reach or negotiate with go2rtc
-    case iceFailed                // negotiated, but no candidate pair connected (port 8555)
+    case signalingFailed     // couldn't reach or negotiate with go2rtc
+    case iceFailed           // negotiated, but no candidate pair connected (port 8555)
     case connectionLost
-    case notAvailable             // no live source for this camera
+    case notAvailable        // no implemented tier for this camera
 }
 ```
-`iceFailed` is deliberately its own case: it is the one failure with a specific, explainable cause
-("port 8555 isn't reachable from here"), it drives C5's fallback to MJPEG, and it is the thing to
-say out loud in the UI rather than a generic error.
 
-### `Networking/Endpoint.swift` (edit)
+`iceFailed` is its own case on purpose: it is the one failure with a specific, explainable cause,
+it is what P4.2 will eventually key its fallback off, and until then it is the thing the UI must
+say out loud instead of spinning.
+
+### Concurrency
+
+The app target compiles with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so this phase walks into
+the sharp edges already recorded in `LEARNINGS.md`:
+
+- **Every off-main type needs explicit `nonisolated`** - `LiveTransport`, `LivePlayerState`,
+  `LivePlayerError`, the signaling message enum - *and so do their extensions*, which do not
+  inherit the annotation.
+- **`RTCPeerConnectionDelegate` callbacks arrive on WebRTC's own threads.** Rather than making
+  `WebRTCLivePlayer` itself `nonisolated`, a small `nonisolated final class
+  PeerConnectionObserver` conforms to the delegate and forwards events to the main actor through
+  an `AsyncStream`. Same pattern as `InsecureTrustDelegate`, and it keeps the player ordinary
+  main-actor code.
+- **`LiveSocket` is an actor** wrapping `URLSessionWebSocketTask`, so the non-`Sendable` task never
+  crosses an isolation boundary; received frames reach the player as an `AsyncStream`.
+
+### Grid stays snapshots
+
+No live streams in the camera list - the "never live-stream a grid" rule, already satisfied by the
+P2 snapshot loop. One live player, focused camera only.
+
+---
+
+## Chunk map
+
+- **C1 - Seam + live source resolution.** Config parsing, the `LiveTransport` ladder, the
+  `LivePlayer`/factory protocols, `SignalingChannel`, and authenticated WebSocket plumbing on
+  `FrigateClient`. No dependency, no video. **Detailed below.**
+- **C2 - go2rtc signaling.** `WebRTCSignaling`: the message codec and handshake sequencing over a
+  `SignalingChannel`. Still no dependency (this is JSON over a socket). Unit-tested against a fake
+  channel; **real-server milestone: the socket opens and stays open against
+  `frigate.sagarp.ca` with the session cookie, and is rejected without it.** That proves the
+  nginx `auth_request` question independently of any WebRTC code - the single cheapest de-risking
+  step in the phase.
+- **C3 - Dependency + `WebRTCLivePlayer` + `LiveVideoView`.** Add the pinned SPM package; check app
+  size and the arm64-simulator slice under Xcode 26 *before* building on it. `recvonly` video
+  transceiver, remote track handoff to `RTCMTLVideoView`, ICE/connection state mapped onto
+  `LivePlayerState`. **Milestone: a moving picture from a real camera on screen.**
+- **C4 - Wire into camera detail.** `LiveCameraView`/`LiveCameraModel`: show the existing snapshot
+  until the first frame renders, then crossfade to live; the snapshot poll stops once live is
+  playing; aspect-ratio handling, tap-to-fullscreen, and distinct states for connecting / stalled /
+  failed / unavailable. **Milestone: open a camera, watch it live, expand it fullscreen.**
+- **C5 - Reconnect, teardown, and honest failure.** Exponential backoff on connection loss; a
+  startup timeout that resolves to `.failed(.iceFailed)` with actionable copy rather than spinning;
+  teardown on `.onDisappear` / `scenePhase` background / tab switch; leak check (peer connection
+  closed, socket closed, tasks cancelled). **Milestone: kill wifi mid-stream and it recovers;
+  block 8555 and it fails within seconds with a message that names the cause.**
+
+_P4 milestone (all chunks): open a camera and watch it live, with automatic recovery after a
+network blip and a truthful, specific failure when WebRTC cannot connect._
+
+---
+
+## C1 - Seam + live source resolution (FULL DETAIL)
+
+No dependency, no video. Config + models + networking seams only, all unit-testable through the
+existing `MockURLProtocol` and in-memory doubles.
+
+### `Models/FrigateConfig.swift` (edit)
+
+Two additive fields, both lenient - existing tests and fixtures construct configs without them and
+must keep decoding.
 
 ```swift
-/// go2rtc WebRTC signaling socket. Off the server root (not `/api/`), like /clips/ and /vod/.
-static func webrtcWebSocket(src: String) -> Endpoint   // "live/webrtc/api/ws", query src=…, basePath: nil
+let go2rtc: Go2RTCInfo                  // decodeIfPresent -> .init()
 
-/// Low-res MJPEG stream from the detect feed (C6 fallback).
-static func mjpegStream(camera: String, fps: Int = 5, height: Int = 720) -> Endpoint
+nonisolated struct Go2RTCInfo: Decodable, Equatable, Sendable {
+    /// Only the KEYS matter. Values are string-or-array-of-string in real configs, so read the
+    /// key set from a nested keyed container and never decode a value at all.
+    let streamNames: Set<String>
+}
 ```
 
-### `Networking/FrigateClient.swift` (edit)
+and inside `CameraConfig`:
+
+```swift
+let live: LiveInfo                      // decodeIfPresent -> .init(streams: [])
+
+nonisolated struct LiveInfo: Decodable, Equatable, Sendable {
+    /// Sorted by label - see the ordering finding below.
+    let streams: [Stream]
+    struct Stream: Equatable, Sendable { let label: String; let name: String }
+}
+```
+
+`CameraConfig` already has a custom `init(from:)` to extend.
+
+**Ordering finding (resolved in C1, and the assumption was wrong).** The PWA uses
+`Object.values(camera.live.streams)[0]` - the user's declaration order, which JavaScript preserves.
+This plan originally assumed `JSONDecoder`'s `allKeys` would follow document order and shipped a
+test to confirm it. **It does not: `allKeys` comes back in hash order**, which is neither document
+order nor sorted, and Swift's per-process hash seed means it genuinely differs between app
+launches. A multi-stream camera would have opened a different stream every time the app started.
+Full write-up in `LEARNINGS.md`.
+
+Resolution: `LiveInfo.streams` is **sorted by label at decode time** so the array is at least
+deterministic, and `LiveStreamSource` layers a meaningful preference on top rather than trusting
+position (see below). The array keeps every label, so the P8 stream picker can replace the guess
+with a choice.
+
+In practice this bites rarely: the server fills `live.streams` with `{name: name}` when unset
+(`config.py:990`), so the overwhelming majority of cameras have exactly one entry.
+
+### `Models/LiveTransport.swift` (new)
+
+`LiveTransport` and `LiveStreamSource.ladder(camera:config:)` as specified in Architecture above.
+Rules. The PWA (`use-camera-live-mode.ts`) takes the *first* `live.streams` entry; since position
+is not available to us, the equivalent is:
+
+- **Candidates** are the camera's `live.streams` values that exist as keys of `go2rtc.streams`. A
+  value naming a nonexistent stream reaches us intact, because the server's own
+  `verify_valid_live_stream_names` *returns* its `ValueError` instead of raising it
+  (`config.py:265`), so this check is the only thing between a config typo and a permanent spinner.
+- **A candidate named after the camera wins.** That is Frigate's own default mapping
+  (`config.py:990`) and the near-universal convention for a main stream, so it agrees with the
+  PWA's pick for the overwhelming majority of configs, single-stream ones included.
+- Otherwise the alphabetically first candidate, purely for stability. This is the one guess, and
+  P8's stream picker is what removes it.
+- No candidates -> `[.mjpeg(camera:)]`.
+- **`live.streams` empty entirely** (older/partial payload) -> apply the server's own default and
+  test the camera name against the go2rtc key set. Deliberately *not* done when the camera declared
+  streams and none of them exist: that is a config error, and silently playing a stream the user did
+  not ask for would hide it.
+
+This is the only place in the app that answers "how do I watch this camera?", and it is pure
+functions over a value type - no client, no network, trivially testable.
+
+### `Features/Live/LivePlayer.swift` (new)
+
+`LivePlayer`, `LivePlayerState`, `LivePlayerError`, `LivePlayerFactory` as specified above. In C1
+the factory has no cases to build yet and returns `nil`; C3 fills in `.webrtc`. Ship it in C1
+anyway so C4 is written against the seam from the start rather than against a concrete player.
+
+### `Features/Live/SignalingChannel.swift` (new)
+
+The seam that makes C2 testable without a server - `URLSessionWebSocketTask` cannot be intercepted
+by `MockURLProtocol`, so the mock has to sit one layer higher:
+
+```swift
+protocol SignalingChannel: Actor {
+    func send(_ text: String) async throws
+    var messages: AsyncStream<String> { get async }
+    func close() async
+}
+```
+
+### `Networking/LiveSocket.swift` (new) + `FrigateClient.swift` (edit)
 
 ```swift
 /// Same URL composition as every other endpoint, with the scheme mapped http->ws / https->wss.
 func webSocketURL(for endpoint: Endpoint) -> URL?
 
-/// A connected WebSocket, created from the client's own URLSession so it inherits the cookie jar
-/// and the insecure-trust delegate. The `frigate_token` cookie is also set explicitly on the
-/// handshake request (nginx `auth_request` gates this route).
+/// A connected WebSocket built from the client's own URLSession, so it inherits the shared cookie
+/// jar and the insecure-trust delegate. The `frigate_token` cookie is also set explicitly on the
+/// handshake request, because nginx `auth_request` gates this route.
 func liveSocket(for endpoint: Endpoint) throws -> LiveSocket
 ```
-`LiveSocket` is a small actor wrapping `URLSessionWebSocketTask` (`send(_:)`, an
-`AsyncStream<Message>` of received frames, `close()`), so the non-`Sendable` task never escapes.
+
+`LiveSocket` is a small actor conforming to `SignalingChannel`, wrapping the task's
+send/receive/cancel and turning the receive loop into an `AsyncStream`.
+
+### `Networking/Endpoint.swift` (edit)
+
+```swift
+/// go2rtc WebRTC signaling socket. Off the server root (not `/api/`), like /clips/ and /vod/.
+static func webrtcWebSocket(src: String) -> Endpoint
+    // path "live/webrtc/api/ws", query src=…, basePath: nil
+```
 
 ### Tests (`FrigateTests`)
 
 - **`FrigateConfigTests`** (extend) - a payload with `go2rtc.streams` + per-camera `live.streams`
   decodes; a payload with neither still decodes (no regression for existing fixtures); go2rtc
-  stream values that are strings *and* arrays both decode without throwing; `live.streams` order
-  is preserved.
-- **`LiveStreamSourceTests`** (new) - restreamed camera -> `.webrtc` with the first mapped stream
-  name; unmapped camera -> `.mjpeg`; camera name matching a go2rtc key with no mapping ->
-  `.webrtc`; multi-stream camera picks the first as configured, not alphabetically.
+  stream values that are strings *and* arrays both decode without throwing; `live.streams` comes
+  back sorted by label from a payload whose document order is neither sorted nor reverse-sorted.
+- **`LiveTransportTests`** (new) - restreamed camera -> ladder headed by `.webrtc`; the ladder
+  carries the *stream* name for WebRTC and the *camera* name for MJPEG (the case a naive
+  implementation conflates); unmapped camera -> `[.mjpeg]`; empty `live.streams` with a matching
+  go2rtc key -> `.webrtc`; a multi-stream camera prefers the stream named after the camera even
+  when another sorts earlier; a multi-stream camera with no such stream resolves *identically
+  across repeated decodes*; a typo'd stream alongside a good one is skipped rather than dragging
+  the camera to MJPEG; every stream typo'd -> `.mjpeg`.
 - **`EndpointTests`** (extend) - `.webrtcWebSocket(src:)` -> `{base}/live/webrtc/api/ws?src=front`
-  with **no** `api/` prefix; `.mjpegStream(...)` -> `{base}/api/front?fps=5&height=720`.
+  with **no** `api/` prefix.
 - **`FrigateClientTests`** (extend) - `webSocketURL` maps `http`->`ws` and `https`->`wss` and keeps
-  host/port/path/query; existing `authedURL` behavior unchanged.
+  host/port/path/query; existing `authedURL` behaviour unchanged.
 
 ### Out of scope for C1 (explicit)
 
-No SPM dependency, no peer connection, no UI, no reconnect policy. C1 proves only: we can tell how
-a given camera should be watched, and we can open an authenticated socket to the right URL.
+No SPM dependency, no peer connection, no signaling logic, no UI, no reconnect policy. C1 proves
+exactly two things: we can tell how a given camera should be watched, and we can open an
+authenticated socket to the right URL.
+
+---
+
+## C2 - go2rtc signaling (SUMMARY)
+
+`WebRTCSignaling` owns the protocol, not the media: a `Codable` message enum
+(`webrtc/offer`, `webrtc/answer`, `webrtc/candidate`), the send-offer-on-open sequencing, and an
+`AsyncStream` of decoded inbound events. It takes a `SignalingChannel`, so unit tests drive it with
+a `FakeSignalingChannel` replaying a scripted message sequence - no server, no libwebrtc.
+
+Cover the shapes that actually bite: an answer arriving before any candidate, candidates arriving
+before the answer, a malformed/unknown `type` (ignore, do not fail the connection), and the socket
+closing mid-handshake. Remember remote candidates carry no `sdpMid` - supply `"0"`, as the PWA does.
+
+**Real-server milestone (do this before C3):** open the socket against the live server with the
+session cookie and confirm the 101 upgrade holds; then confirm it is rejected without the cookie.
+That settles the nginx `auth_request`-over-WebSocket question while it is still cheap to be wrong,
+and it is the one C2 result that no unit test can give us.
+
+## C3 - Dependency + `WebRTCLivePlayer` + `LiveVideoView` (SUMMARY)
+
+Add `stasel/WebRTC` pinned exactly. **Before writing player code:** confirm the xcframework embeds
+and signs under Xcode 26, that the arm64 simulator slice works, and measure the app-size delta -
+record the number in `LEARNINGS.md` rather than repeating the "~30MB" folklore.
+
+`WebRTCLivePlayer` conforms to `LivePlayer`: `RTCPeerConnectionFactory`, `bundlePolicy:
+.maxBundle`, the Google STUN server as fallback ICE (matching the PWA), one **video-only**
+`recvonly` transceiver, `createOffer` -> `setLocalDescription` -> hand to `WebRTCSignaling`.
+Remote track goes to `RTCMTLVideoView` behind a `UIViewRepresentable`.
+
+Video-only is deliberate for P4: audio is out of scope, and requesting audio invites a class of
+negotiation failure (codec mismatch against cameras with no or odd audio) for a track we would
+discard. Adding it later is one transceiver.
+
+`PeerConnectionObserver` (nonisolated) translates delegate callbacks into main-actor events;
+`RTCIceConnectionState`/`RTCPeerConnectionState` map onto `LivePlayerState`, with `.failed`/
+`.disconnected` distinguishing `iceFailed` from `connectionLost`.
+
+## C4 - Wire into camera detail (SUMMARY)
+
+`LiveCameraModel` resolves the ladder from `AppModel`'s config, asks `LivePlayerFactory` for a
+player, and owns start/stop. `LiveCameraView` stacks the live surface over the existing snapshot
+and crossfades on first frame (`RTCVideoViewDelegate.didChangeVideoSize` is the signal; the Metal
+view is transparent until then, which gives the loading state for free - same trick as the Recent
+Activity strip's `AVPlayerLayer`, see `LEARNINGS.md`). The snapshot poll stops once state reaches
+`.playing` and resumes if live fails. Tap to fullscreen; `.notAvailable` keeps the P2 snapshot
+experience unchanged rather than showing an error.
+
+## C5 - Reconnect, teardown, honest failure (SUMMARY)
+
+Exponential backoff on `connectionLost`. A startup deadline (the PWA uses 5s) that resolves to
+`.failed(.iceFailed)` rather than spinning, and a stall deadline (3s without frames) that shows
+`.stalled` before dropping to reconnect. Teardown on `.onDisappear`, `scenePhase` background, and
+tab switch; verify the peer connection is closed, the socket closed, and every task cancelled.
+
+Because no fallback tier exists yet, `iceFailed` copy must name the cause and the fix in plain
+language ("this camera's live stream can't be reached from this network - it needs port 8555 open
+to the app") with a Retry, plus the snapshot still visible underneath. Getting this wrong is how a
+correct implementation reads as a broken app.
+
+---
+
+## Deferred tiers: research already banked
+
+Recorded here so P4.1 and P4.2 need no re-research.
+
+**MSE (P4.1).** Open `/live/mse/api/ws?src={stream}`, send
+`{"type":"mse","value":"<comma-separated codecs>"}`, receive a text ack naming the negotiated
+codecs, then binary fMP4: init segment first, then `moof`+`mdat` pairs. No ack within ~3s is the
+PWA's cue to fall back. Requires H.264/H.265 video and PCMA/PCMU or AAC audio. The work is a reader
+for ~8 ISO 14496-12 box types (`ftyp`, `moov`->`mdhd`/`stsd`->`avcC`/`hvcC`, `moof`->`tfhd`/`tfdt`/
+`trun`, `mdat`) feeding `CMSampleBuffer`s to `AVSampleBufferDisplayLayer`; VideoToolbox does the
+decoding via `CMVideoFormatDescriptionCreateFromH264ParameterSets`. No decoder to write, but ~400-600
+lines of media plumbing we would own forever. **No library removes this work** - surveyed in
+ADR-012 (FragmentedMP4Parser unmaintained and file-oriented, FFmpegKit retired April 2025,
+VLCKit/mpv need a URL, HaishinKit is a publishing library).
+
+**MJPEG (P4.2).** `GET /api/{camera_name}` (`frigate/api/media.py:77`), params `fps` (default 3),
+`height` (default 360), plus `bbox`/`timestamp`/`zones`/`mask`/`motion`/`regions` overlays.
+Returns `multipart/x-mixed-replace;boundary=frame`; parse the boundary stream off
+`URLSession.bytes`. Frames come from the **detect** stream via `get_current_frame`
+(`frigate/camera/state.py:81`), resized with `cv2.resize` and encoded at JPEG quality 70 **per
+connected client** (`media.py:107-127`) - so server CPU scales per viewer, asking for a `height`
+above the detect resolution only upscales, and 720p at 5fps is roughly 2-5 Mbps. Defaults are low
+for a reason. The server-drawn bounding-box overlay is a genuine upside no other tier offers.
 
 ---
 
 ## Risks
 
-- **ICE reachability is the risk that decides P4's real-world success.** Mitigation is structural,
-  not hopeful: C5's fallback to MJPEG means an unreachable 8555 degrades instead of hanging, and
-  `LivePlayerError.iceFailed` gives the UI something true to say. Verify early - C2's milestone is
-  a real connected candidate pair against the real server, not a green unit test.
-- **Binary dependency.** Pin the exact libwebrtc version; check app size impact when it lands
-  (a ~30MB xcframework is the single biggest thing in the app) and confirm bitcode/arm64-simulator
-  slices work under Xcode 26 before building C3 on top of it.
-- **Deferred MSE means a reach gap** for users behind UDP/TCP-hostile tunnels: they get MJPEG
-  quality, not real video. Accepted deliberately, documented in the ADR, and revisitable as a
-  self-contained chunk - the `LivePlayer` seam is what keeps that cheap.
+- **ICE reachability decides whether P4 succeeds in the real world.** With no fallback tier in this
+  phase, the mitigation is honesty rather than degradation: fail fast and name the cause (C5).
+  Verify early - C2's real-server milestone and C3's first live frame are both gates, not
+  formalities.
+- **Binary dependency.** Pin exactly; measure app size when it lands; confirm the simulator slice
+  under Xcode 26 before building C3 on top of it. Community rebuilds tie our release cadence to
+  someone else's.
+- **Decode-session contention.** iOS caps simultaneous H.264 decode sessions at an undocumented
+  3-4, and the Recent Activity strip already runs 2-4 looping players on the screen live view is
+  pushed *from*. The strip tears down on `.onDisappear`, so this should be fine - but it is the
+  exact documented failure mode (`LEARNINGS.md`), so check it explicitly rather than assume.
+- ~~**The `live.streams` ordering assumption**~~ - **resolved in C1, and it was wrong.** `allKeys`
+  is hash order and unstable across launches; resolution is now deterministic and prefers the
+  camera-named stream. The residual risk is narrow: for a multi-stream camera with no
+  camera-named stream we may open a different stream than the PWA would, until P8's stream picker
+  lands. See `LEARNINGS.md`.
 - **Carry-over from P3:** clip playback (`ClipPlayerView`) has still never been smoke-tested
   against a real server on a device. The first P4 device session should verify it in the same
   sitting - it exercises the same cookie-auth-for-media assumption this phase leans on.
 
 ## Out of scope for P4
 
-Audio, two-way talk, PTZ, live in the grid, recordings scrubbing, picture-in-picture, multi-stream
-quality switching, and the MSE demuxer. All later phases.
+Audio, two-way talk, PTZ, live in the camera list, recordings scrubbing, picture-in-picture,
+multi-stream quality switching, the MSE demuxer (P4.1), and the MJPEG player (P4.2).
 
 ## Verification
 
 Per chunk: `xcodebuild -project "app/Frigate.xcodeproj" -scheme Frigate -destination 'platform=iOS
 Simulator,name=iPhone 17' test` stays green (105 tests today).
 
-End-to-end (needs the real server, and a physical device for the honest latency/battery read):
+End-to-end (needs the real server, and a physical device for an honest latency/battery read):
 open a camera -> still image appears immediately -> live video takes over within a couple of
 seconds -> leave it running five minutes without stalling -> drop wifi and watch it reconnect ->
-background the app and confirm the peer connection closes -> block port 8555 (or test from a
-network that can't reach it) and confirm the MJPEG fallback engages with a clear explanation ->
-open a non-restreamed camera and confirm the same fallback.
+background the app and confirm the peer connection closes -> test from a network that cannot reach
+8555 and confirm a fast, specific failure rather than a spinner -> open a non-restreamed camera and
+confirm it reports live as unavailable while keeping its snapshot.
 
 ## Docs to update as we go
 
-- `docs/ROADMAP.md` - rewrite the P4 bullets around WebRTC + MJPEG; flip statuses per chunk.
-- `docs/DECISIONS.md` - an ADR recording that Frigate exposes **no live HLS** (the finding that
-  invalidates the original plan), why WebRTC + MJPEG was chosen over building an fMP4 demuxer, and
-  the conditions under which we'd revisit MSE.
-- `CLAUDE.md` - amend the two rules this finding invalidates: "ship `HLSPlayer` only for v1" and
-  "low-res HLS for the grid" (grid stays on snapshots).
-- `docs/LEARNINGS.md` - ICE/candidate gotchas, whether the WS handshake really carries the cookie,
-  and what the app-size hit actually was.
+- `docs/ROADMAP.md` - flip C1-C5 statuses as they land.
+- `docs/components/app.md` - add a "Feature: Live (P4)" section once code exists.
+- `docs/LEARNINGS.md` - the `live.streams` ordering finding, whether the WS handshake really
+  carries the cookie, the measured app-size hit, and any ICE/candidate gotchas.
+- `docs/DECISIONS.md` - a follow-up ADR only if reality forces a change of approach; ADR-012
+  already records the decision itself.

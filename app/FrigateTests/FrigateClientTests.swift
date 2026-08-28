@@ -236,6 +236,49 @@ final class FrigateClientTests: XCTestCase {
         }
     }
 
+    // MARK: WebSockets (P4 live view)
+
+    func testWebSocketURLMapsHTTPSToWSSKeepingHostPortPathAndQuery() async {
+        let url = await makeClient().webSocketURL(for: .webrtcWebSocket(src: "front_door_hi"))
+        XCTAssertEqual(url?.absoluteString, "wss://nvr.local:8971/live/webrtc/api/ws?src=front_door_hi")
+    }
+
+    func testWebSocketURLMapsHTTPToWS() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = FrigateClient(
+            baseURL: URL(string: "http://192.168.1.50:5000")!,
+            session: URLSession(configuration: config)
+        )
+        let url = await client.webSocketURL(for: .webrtcWebSocket(src: "front"))
+        XCTAssertEqual(url?.absoluteString, "ws://192.168.1.50:5000/live/webrtc/api/ws?src=front")
+    }
+
+    /// nginx gates the signaling route with `auth_request`, so the handshake has to carry
+    /// `frigate_token`. The cookie lookup deliberately uses the https URL, not the wss one -
+    /// `HTTPCookieStorage` withholds `Secure` cookies from schemes it doesn't consider secure, and
+    /// `wss` is not one of them.
+    func testWebSocketRequestCarriesSessionCookieOnTheHandshake() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cookie = HTTPCookie(properties: [
+            .domain: "nvr.local", .path: "/", .name: "frigate_token", .value: "abc123", .secure: "TRUE",
+        ])!
+        session.configuration.httpCookieStorage?.setCookie(cookie)
+        let client = FrigateClient(baseURL: baseURL, session: session)
+
+        let request = try await client.webSocketRequest(for: .webrtcWebSocket(src: "front_door_hi"))
+
+        XCTAssertEqual(request.url?.scheme, "wss")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "frigate_token=abc123")
+    }
+
+    func testWebSocketRequestOmitsCookieHeaderWhenTheJarIsEmpty() async throws {
+        let request = try await makeClient().webSocketRequest(for: .webrtcWebSocket(src: "front"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+    }
+
     // MARK: Helpers
 
     private func assertThrows(

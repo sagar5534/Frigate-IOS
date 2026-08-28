@@ -129,6 +129,18 @@ nonisolated extension Endpoint {
         )
     }
 
+    /// go2rtc's WebRTC signaling socket. Off the server root (not `/api/`), like `/clips/` and
+    /// `/vod/`, and gated by the same nginx `auth_request` - so the handshake needs the session
+    /// cookie. `src` is the **go2rtc stream name**, which is not always the camera name; resolve it
+    /// with `LiveStreamSource.ladder(camera:config:)` rather than passing a camera name through.
+    static func webrtcWebSocket(src: String) -> Endpoint {
+        Endpoint(
+            path: "live/webrtc/api/ws",
+            query: [URLQueryItem(name: "src", value: src)],
+            basePath: nil
+        )
+    }
+
     /// HLS VOD manifest for a segment's camera/time range - the source Frigate recommends for
     /// iOS playback over the progressive `clip.mp4`. Off the server root, not `/api/`.
     static func reviewClipHLS(camera: String, start: Double, end: Double) -> Endpoint {

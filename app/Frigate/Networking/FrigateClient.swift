@@ -208,3 +208,60 @@ extension FrigateClient {
         session.configuration.httpCookieStorage?.cookies(for: url) ?? []
     }
 }
+
+// MARK: WebSockets (P4 live view)
+
+extension FrigateClient {
+    /// The endpoint's URL with the scheme mapped for WebSockets (`https` -> `wss`, `http` -> `ws`).
+    func webSocketURL(for endpoint: Endpoint) -> URL? {
+        guard let url = try? endpointURL(endpoint) else { return nil }
+        return Self.webSocketScheme(url)
+    }
+
+    /// The exact handshake request `liveSocket(for:)` will use. Public for tests and for logging a
+    /// failed live connection - when a socket is refused, the request that was refused is the
+    /// single most useful thing to see.
+    func webSocketRequest(for endpoint: Endpoint) throws -> URLRequest {
+        let httpURL = try endpointURL(endpoint)
+        guard let socketURL = Self.webSocketScheme(httpURL) else { throw APIError.invalidURL }
+
+        var request = URLRequest(url: socketURL)
+        for (field, value) in endpoint.headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+
+        // nginx gates `/live/webrtc/api/ws` with the same `auth_request` as `/clips/` and `/vod/`,
+        // so the handshake needs `frigate_token`. The session would normally attach jar cookies
+        // itself, but set them explicitly as a belt - a silent miss here surfaces as an unexplained
+        // server rejection, which is the most expensive kind of bug to chase.
+        //
+        // Note the lookup uses the **http(s)** URL, not the ws(s) one: `HTTPCookieStorage` decides
+        // whether to hand back `Secure` cookies by looking at the URL's scheme, and `wss` is not on
+        // its list of secure schemes.
+        let cookies = session.configuration.httpCookieStorage?.cookies(for: httpURL) ?? []
+        if !cookies.isEmpty {
+            for (field, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+        }
+        return request
+    }
+
+    /// A signaling socket built from this client's own `URLSession`, so it inherits the shared
+    /// cookie jar and the `InsecureTrustDelegate`. Call `start()` on the result to connect.
+    func liveSocket(for endpoint: Endpoint) throws -> LiveSocket {
+        LiveSocket(task: session.webSocketTask(with: try webSocketRequest(for: endpoint)))
+    }
+
+    private static func webSocketScheme(_ url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        switch components.scheme {
+        case "https": components.scheme = "wss"
+        case "http": components.scheme = "ws"
+        default: break
+        }
+        return components.url
+    }
+}

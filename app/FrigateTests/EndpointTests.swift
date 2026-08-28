@@ -118,4 +118,14 @@ final class EndpointTests: XCTestCase {
         XCTAssertEqual(json?["ids"] as? [String], ["abc123"])
         XCTAssertEqual(json?["reviewed"] as? Bool, true)
     }
+
+    // MARK: Live view (P4)
+
+    func testWebRTCWebSocketEndpointAddressesServerRootNotAPI() {
+        let endpoint = Endpoint.webrtcWebSocket(src: "front_door_hi")
+        XCTAssertEqual(endpoint.path, "live/webrtc/api/ws")
+        XCTAssertNil(endpoint.basePath, "signaling lives off the server root, like /clips/ and /vod/")
+        XCTAssertEqual(endpoint.query, [URLQueryItem(name: "src", value: "front_door_hi")])
+        XCTAssertEqual(endpoint.method, .get)
+    }
 }

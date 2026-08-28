@@ -214,3 +214,38 @@ Four things that are not obvious and each cost a real behaviour if missed:
 Unrelated but adjacent: `@Observable` fires on *assignment*, not on change. A poll that re-publishes
 an identical list still invalidates the view - guard on equality before assigning, or a 30s refresh
 re-identifies the cards and restarts their playback.
+
+## `JSONDecoder`'s `allKeys` is hash order - not document order, and not stable across launches
+
+Frigate's `/api/config` has two objects whose **keys are user-defined names**: `go2rtc.streams`
+(stream name -> source) and per-camera `live.streams` (label -> stream name). The PWA picks a
+camera's live stream with `Object.values(camera.live.streams)[0]`, which is the user's declaration
+order because JavaScript preserves JSON object order.
+
+Swift does not, and the failure is worse than "sorted instead". Reading a nested
+`KeyedDecodingContainer`'s `allKeys` for the document
+
+```json
+{"mike": …, "alpha": …, "zulu": …, "bravo": …, "yankee": …, "charlie": …}
+```
+
+returned `["yankee", "mike", "alpha", "bravo", "charlie", "zulu"]` - **hash order**. A three-key
+probe happened to come back alphabetical, which is exactly the coincidence that would have let a
+smaller test enshrine the wrong conclusion. Since Swift seeds its hasher per process, the "natural"
+order genuinely differs from one app launch to the next: a camera with several configured streams
+would have opened a different one each time the app started.
+
+There is no ordered-JSON option in Foundation (`JSONSerialization` is unordered too), and
+`Decoder` gives no access to the raw bytes, so preserving document order would mean hand-parsing
+that sub-object. Not worth it for a field that has one entry on the overwhelming majority of
+cameras.
+
+What we do instead (`FrigateConfig.LiveInfo`, `LiveStreamSource`): **sort by label at decode time**
+so the array is at least deterministic, then layer a meaningful preference on top - a stream whose
+name equals the camera name wins, because that is Frigate's own default mapping
+(`frigate/config/config.py:990` writes `{name: name}`) and the near-universal convention for a
+camera's main stream. Alphabetically-first is only the tiebreak, and it is a guess; the array keeps
+every label so a stream picker (P8) can replace the guess with a choice.
+
+The general lesson: if a JSON object's key *order* carries meaning, decode it into an ordered
+representation with an explicit ordering rule you chose. Never let `allKeys` order reach behaviour.

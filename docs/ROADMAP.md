@@ -99,14 +99,44 @@ signal a real server hasn't disproven._
   and loop, scrolling snaps with no black cards, tap pushes `ReviewDetailView`, marking reviewed
   removes the card, and the empty state leaves no gap above the camera list._
 
-## P4 - Live video
-- [ ] Define the `LivePlayer` interface
-- [ ] `HLSPlayer` implementation (AVPlayer + HLS)
-- [ ] Single-camera fullscreen live view
-- [ ] Wire live view into the camera detail screen
-- [ ] Reconnect / clean teardown handling
+## P4 - Live video (WebRTC)
+Frigate exposes **no live HLS** - the original `HLSPlayer` plan is void (ADR-012). Live view is a
+three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
+`docs/plans/P4-live-video.md`.
+- [x] C1 - `LivePlayer` seam + live source resolution - `LiveTransport`/`LiveStreamSource.ladder`,
+  `FrigateConfig.go2rtc` + `CameraConfig.live`, `LivePlayer`/`LivePlayerState`/`LivePlayerError`/
+  `LivePlayerFactory`, `SignalingChannel` + `LiveSocket`, `Endpoint.webrtcWebSocket`,
+  `FrigateClient.webSocketURL`/`webSocketRequest`/`liveSocket`. 145 tests green (was 126).
+  Found that `JSONDecoder`'s `allKeys` is hash order, so stream resolution can't use position -
+  see `LEARNINGS.md` and the plan's C1 ordering finding
+- [ ] C2 - go2rtc signaling (`SignalingChannel` seam, offer/answer/candidate codec, handshake
+  sequencing) - unit-tested against a fake channel, socket proven against the real server
+- [ ] C3 - WebRTC dependency (`stasel/WebRTC`, pinned) + `WebRTCLivePlayer` + `LiveVideoView`
+- [ ] C4 - Wire into camera detail: snapshot until first frame, fullscreen, connecting/stalled/
+  failed states, snapshot poll stops once live is playing
+- [ ] C5 - Reconnect, teardown, and an actionable `iceFailed` message (no fallback tier exists yet)
 
-_Milestone: watch a live camera._
+_Milestone: open a camera and watch it live, recovering after a network blip._
+
+## P4.1 - Live video: MSE tier
+Demand-driven, not scheduled. Real H.264 at ~1-2s over the **same authenticated HTTPS origin**, so
+it reaches users behind Cloudflare Tunnel and other setups WebRTC's port-8555 media path cannot
+cross. Hand-written fMP4 demuxer into `AVSampleBufferDisplayLayer` (~400-600 lines); no library
+exists that consumes a live fMP4 byte stream (surveyed in ADR-012). Slots in as one `LivePlayer`
+conformer plus one case in `LivePlayerFactory`.
+- [ ] `MSELivePlayer` behind the existing seam
+- [ ] Automatic escalation down the ladder when the tier above fails
+
+_Milestone: a user whose network blocks WebRTC still gets real video._
+
+## P4.2 - Live video: MJPEG tier
+The floor: `multipart/x-mixed-replace` off the existing `FrigateClient` path. No ports, no YAML, no
+go2rtc. Also the **only** option for cameras with no restream configured, so this tier is what
+makes live view work for every camera rather than most.
+- [ ] `MJPEGLivePlayer` behind the existing seam
+- [ ] Non-restreamed cameras resolve to this tier automatically
+
+_Milestone: every camera shows motion, on every network._
 
 ---
 
@@ -123,7 +153,7 @@ HA add-on + Docker for the notifier; bring-your-own-push escape hatch.
 _Milestone: a new user installs from a documented, supported path._
 
 ## P8 - Parity extras
-Recordings timeline, PTZ, two-way audio, quiet hours, WebRTC low-latency live, full settings.
+Recordings timeline, PTZ, two-way audio, quiet hours, full settings.
 _Milestone: feature parity with the PWA._
 
 ---
@@ -137,3 +167,7 @@ _Milestone: feature parity with the PWA._
   whole HLS request chain, not just the initial fetch
 - **P3, not yet done:** whether `/api/review`'s `start_time`/`end_time` come back numeric (assumed
   throughout `ReviewSegment`) or ever as ISO strings on some server/version
+- **P4:** whether the `frigate_token` cookie really rides the WebSocket handshake through nginx's
+  `auth_request` on `/live/webrtc/api/ws` (C2 proves this before any WebRTC code exists)
+- **P4:** whether go2rtc's advertised ICE candidates are reachable from cellular and from LAN on
+  the real server, and what the app-size hit of the libwebrtc xcframework actually is
