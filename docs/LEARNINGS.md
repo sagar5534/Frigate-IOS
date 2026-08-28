@@ -276,3 +276,28 @@ The trap is the reporting, not the mechanism. A run where every test skipped sti
 like one that passed. Any `XCTSkip` guarding a check that *matters* should say in its message how to
 actually run it - and when a skip is the answer to a question you asked, confirm it ran before
 believing the green.
+
+## libwebrtc's real app-size cost is 12MB, not the ~30MB everyone quotes
+
+The P4 plan carried "a ~30MB xcframework is the single biggest thing in the app" as received
+wisdom. Measured, with `stasel/WebRTC` 151.0.0 (M151) linked into the Frigate target:
+
+| Build | App bundle | `WebRTC.framework` | Slices |
+|---|---|---|---|
+| Debug, iOS Simulator | 30 MB | 27 MB | x86_64 + arm64 |
+| **Release, device** | **13 MB** | **12 MB** | arm64 |
+
+The 30MB figure is the *simulator* build: an unstripped debug binary carrying two architectures.
+The number that ships is the arm64 release slice, and it is 12MB - still ~90% of the app, since the
+app's own code is about 1MB, but less than half the folklore. Quote the release-device number; a
+`du -sh` of a Debug-iphonesimulator bundle overstates a binary dependency by ~2.2x.
+
+Measure it with a signing-free device build, which needs no provisioning:
+
+```bash
+xcodebuild -project app/Frigate.xcodeproj -scheme Frigate \
+  -destination 'generic/platform=iOS' -configuration Release CODE_SIGNING_ALLOWED=NO build
+```
+
+The arm64-simulator slice is present and links cleanly under Xcode 26 - the Debug simulator build's
+`lipo -info` reports `x86_64 arm64`, so Apple Silicon Macs need no Rosetta workaround.

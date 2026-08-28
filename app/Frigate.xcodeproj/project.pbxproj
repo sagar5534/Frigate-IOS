@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		1B0487CE304151A30008DFF7 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 1B0487CD304151A30008DFF7 /* WebRTC */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		1BB5C40000000000000000B2 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1B0487CE304151A30008DFF7 /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -103,6 +108,7 @@
 			);
 			name = Frigate;
 			packageProductDependencies = (
+				1B0487CD304151A30008DFF7 /* WebRTC */,
 			);
 			productName = Frigate;
 			productReference = 1BB5C30830054FCF001C6B21 /* Frigate.app */;
@@ -159,6 +165,9 @@
 			);
 			mainGroup = 1BB5C2FF30054FCF001C6B21;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				1B0487CC304151A30008DFF7 /* XCRemoteSwiftPackageReference "WebRTC" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1BB5C30930054FCF001C6B21 /* Products */;
 			projectDirPath = "";
@@ -512,6 +521,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		1B0487CC304151A30008DFF7 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = exactVersion;
+				version = 151.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1B0487CD304151A30008DFF7 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1B0487CC304151A30008DFF7 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1BB5C30030054FCF001C6B21 /* Project object */;
 }

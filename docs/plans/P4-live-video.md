@@ -453,9 +453,10 @@ C1's resolution against a live config rather than a fixture.
 
 ## C3 - Dependency + `WebRTCLivePlayer` + `LiveVideoView` (SUMMARY)
 
-Add `stasel/WebRTC` pinned exactly. **Before writing player code:** confirm the xcframework embeds
-and signs under Xcode 26, that the arm64 simulator slice works, and measure the app-size delta -
-record the number in `LEARNINGS.md` rather than repeating the "~30MB" folklore.
+`stasel/WebRTC` is pinned at `exactVersion` 151.0.0 (resolved revision `19aa8c1f`), on the Frigate
+target only. Precondition checks are **done**: it embeds and links under Xcode 26, the simulator
+slice carries both x86_64 and arm64, and the shipping cost is 12MB on the arm64 release slice (see
+`LEARNINGS.md` - the widely quoted ~30MB is a Debug simulator measurement).
 
 `WebRTCLivePlayer` conforms to `LivePlayer`: `RTCPeerConnectionFactory`, `bundlePolicy:
 .maxBundle`, the Google STUN server as fallback ICE (matching the PWA), one **video-only**
@@ -526,9 +527,11 @@ for a reason. The server-drawn bounding-box overlay is a genuine upside no other
   phase, the mitigation is honesty rather than degradation: fail fast and name the cause (C5).
   Verify early - C2's real-server milestone and C3's first live frame are both gates, not
   formalities.
-- **Binary dependency.** Pin exactly; measure app size when it lands; confirm the simulator slice
-  under Xcode 26 before building C3 on top of it. Community rebuilds tie our release cadence to
-  someone else's.
+- **Binary dependency** - *measured, and cheaper than feared.* `stasel/WebRTC` 151.0.0 pinned
+  exactly; the shipping cost is **12MB** (arm64 release slice), not the ~30MB folklore, though that
+  is still ~90% of a 13MB app. The arm64-simulator slice links cleanly under Xcode 26. See
+  `LEARNINGS.md`. The residual risk is cadence: community rebuilds tie our releases to someone
+  else's schedule (M151 shipped 2026-08-07, on a steady monthly rhythm).
 - **Decode-session contention.** iOS caps simultaneous H.264 decode sessions at an undocumented
   3-4, and the Recent Activity strip already runs 2-4 looping players on the screen live view is
   pushed *from*. The strip tears down on `.onDisappear`, so this should be fine - but it is the

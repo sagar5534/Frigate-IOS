@@ -38,8 +38,12 @@ DerivedData/
 .build/
 Packages/
 Package.pins
-Package.resolved
 .swiftpm/
+
+# Package.resolved is the lockfile pinning libwebrtc's exact resolved revision. The stock Swift
+# .gitignore drops it because *libraries* shouldn't pin their consumers - this is an app, so
+# reproducible builds want it committed. See DECISIONS.md ADR-012 on pinning the binary exactly.
+!Package.resolved
 
 # CocoaPods
 # Uncomment the next line if you do NOT check Pods into source control
