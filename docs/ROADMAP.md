@@ -123,11 +123,21 @@ three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
   maps connection state onto `LivePlayerState`; `LiveVideoView` hosts `RTCMTLVideoView`.
   166 tests. **Code only: C3's real milestone - a moving picture from a real camera - is unmet,
   because the C2 gate has still not been run**
-- [ ] C4 - Wire into camera detail: snapshot until first frame, fullscreen, connecting/stalled/
-  failed states, snapshot poll stops once live is playing
-- [ ] C5 - Reconnect, teardown, and an actionable `iceFailed` message (no fallback tier exists yet)
+- [x] C4 - Wired into camera detail - `LiveCameraModel`/`LiveCameraView`; the camera list stays on
+  the P2 snapshot loop and live starts only when a camera is opened. The snapshot sits *under* the
+  video permanently (a Metal view with no frame is transparent), so there is no crossfade to tune
+  and a failure falls back to a working picture. Tap to fullscreen, letterboxed to the stream's
+  real aspect. The snapshot poll and its freshness badge stop once video is genuinely on screen
+- [x] C5 - Reconnect and teardown - exponential backoff with an attempt cap, a startup deadline so
+  a stuck connection fails in 12s instead of libwebrtc's ~30s+, a stall grace period, and teardown
+  on `onDisappear`/`scenePhase`. `.iceFailed` is deliberately *not* auto-retried (it is structural)
+  and `.noVideo` was added so a connected-but-silent camera stops being blamed on the network
 
-_Milestone: open a camera and watch it live, recovering after a network blip._
+_Milestone: **met.** Verified end to end against frigate.sagarp.ca in the simulator: tap a camera ->
+snapshot immediately -> live H.264 within ~2s -> fullscreen -> back, with the snapshot loop resuming.
+Two real bugs were found only by doing this (see `LEARNINGS.md`): renderers silently unsubscribed
+because the `RTCVideoTrack` wrapper wasn't retained, and the startup deadline blamed port 8555 for a
+connection that had already succeeded._
 
 ## P4.1 - Live video: MSE tier
 Demand-driven, not scheduled. Real H.264 at ~1-2s over the **same authenticated HTTPS origin**, so

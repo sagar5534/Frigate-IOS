@@ -301,3 +301,45 @@ xcodebuild -project app/Frigate.xcodeproj -scheme Frigate \
 
 The arm64-simulator slice is present and links cleanly under Xcode 26 - the Debug simulator build's
 `lipo -info` reports `x86_64 arm64`, so Apple Silicon Macs need no Rosetta workaround.
+
+## An `RTCVideoTrack` you don't retain silently unsubscribes your renderers
+
+WebRTC connected, ICE reached `connected`, and `inbound-rtp` reported 74 frames received and 73
+decoded at 1600px. The screen stayed on the snapshot and **not one renderer callback ever fired** -
+neither `RTCMTLVideoView`'s nor a plain `RTCVideoRenderer` attached to the same track. No error, no
+crash, no log.
+
+The cause is ownership. `RTCVideoTrack.add(_:)` (`-addRenderer:`) wraps the renderer in an adapter
+that the **track** holds, and registers that adapter as a native sink. `RTCRtpReceiver.track`
+returns an ObjC wrapper that nothing else keeps alive, so:
+
+```swift
+// Compiles, runs, decodes video, renders nothing.
+(transceiver?.receiver.track as? RTCVideoTrack)?.add(renderer)
+```
+
+the wrapper deallocates at the end of the statement and takes its sinks with it. The fix is a
+strong reference for as long as you want frames:
+
+```swift
+private var videoTrack: RTCVideoTrack?   // must outlive the renderers
+...
+videoTrack = track
+track.add(renderer)
+```
+
+Two things worth carrying forward:
+
+- **Attach remote tracks in `peerConnection(_:didAdd:streams:)`**, not from
+  `addTransceiver(...)?.receiver.track`. The delegate hands over the receiver libwebrtc actually
+  feeds, and it is the path the samples use.
+- **Don't hang "is video flowing?" off a view's rendering.** The first-frame signal was originally
+  `RTCMTLVideoView.delegate`'s `didChangeVideoSize`, which only fires as a side effect of the view
+  *rendering* - needing a window, non-zero bounds, and working Metal. A separate `RTCVideoRenderer`
+  attached to the track answers the question being asked, whatever the view is doing.
+
+The debugging lesson is the general one: **`inbound-rtp` statistics are the first thing to reach
+for on a silent stream.** `bytesReceived` and `framesDecoded` split "the media path is blocked"
+from "the media path works and nothing is consuming it", and those look identical on screen while
+pointing at opposite fixes. Without the numbers the natural conclusion was "port 8555 is blocked" -
+which the app was busily telling the user, having reached `connected` seconds earlier.

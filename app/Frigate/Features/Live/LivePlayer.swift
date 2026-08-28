@@ -11,6 +11,10 @@ protocol LivePlayer: AnyObject {
     var state: LivePlayerState { get }
     /// Which rung of the ladder this actually is, so the UI can name the tier it fell back to.
     var transport: LiveTransport { get }
+    /// The incoming video's pixel dimensions once known, so the UI can shape its container to the
+    /// stream rather than assuming 16:9. A property of the media, not of any rendering technology,
+    /// so every tier can answer it.
+    var videoSize: CGSize? { get }
     /// Called on every state change. Players are not `@Observable` (SwiftUI can't observe through
     /// an existential), so the owning model republishes state through this rather than watching it.
     var onStateChange: (@MainActor (LivePlayerState) -> Void)? { get set }
@@ -24,6 +28,9 @@ protocol LivePlayer: AnyObject {
 nonisolated enum LivePlayerState: Equatable, Sendable {
     case idle
     case connecting
+    /// **Pixels are on screen.** Not merely "the transport connected" - a peer connection can reach
+    /// `connected` and deliver nothing, which looks exactly like still connecting. Callers rely on
+    /// this to decide when the snapshot underneath can stop refreshing, so it has to mean video.
     case playing
     /// Connected but no frames arriving. Recoverable; distinct from `.failed`.
     case stalled
@@ -37,6 +44,11 @@ nonisolated enum LivePlayerError: Equatable, Sendable {
     /// from where the phone is. Its own case because it is the one failure with a specific,
     /// explainable cause - and eventually what P4.2 keys its fallback off.
     case iceFailed
+    /// Connected, and then no video arrived. Distinct from `.iceFailed` because the advice is the
+    /// opposite: the network is demonstrably fine and the camera or its stream is the problem.
+    /// Telling someone to open port 8555 when the connection already succeeded sends them to
+    /// reconfigure a router for nothing.
+    case noVideo
     case connectionLost
     /// No tier in this build can play this camera.
     case notAvailable
@@ -49,11 +61,23 @@ nonisolated enum LivePlayerError: Equatable, Sendable {
 /// Adding a tier is one case here plus its `LivePlayer` conformer. Automatic *escalation* - falling
 /// to the next rung when a connected tier dies - is deliberately deferred until a second rung
 /// exists to escalate to (P4.2); the ladder being an ordered list is what keeps that additive.
-@MainActor
-struct LivePlayerFactory {
+nonisolated struct LivePlayerFactory {
+    /// Replaces the built-in tier construction. The seam exists so `LiveCameraModel`'s reconnect
+    /// policy can be driven against a scripted player - otherwise the only way to test a backoff
+    /// chain would be to break a real camera connection on a real server, repeatedly.
+    typealias Build = @MainActor @Sendable (LiveTransport, FrigateClient) -> (any LivePlayer)?
+
+    private let override: Build?
+
+    init(override: Build? = nil) {
+        self.override = override
+    }
+
+    @MainActor
     func makePlayer(for ladder: [LiveTransport], client: FrigateClient) -> (any LivePlayer)? {
+        let build = override ?? Self.buildImplementedTier
         for transport in ladder {
-            if let player = makePlayer(for: transport, client: client) {
+            if let player = build(transport, client) {
                 return player
             }
         }
@@ -61,7 +85,8 @@ struct LivePlayerFactory {
     }
 
     /// One rung. `nil` means "this build has no implementation for that tier", not a failure.
-    private func makePlayer(for transport: LiveTransport, client: FrigateClient) -> (any LivePlayer)? {
+    @MainActor
+    private static func buildImplementedTier(_ transport: LiveTransport, _ client: FrigateClient) -> (any LivePlayer)? {
         switch transport {
         case .webrtc(let streamName):
             return WebRTCLivePlayer(streamName: streamName, client: client)

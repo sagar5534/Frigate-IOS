@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 import WebRTC
 
@@ -12,6 +13,7 @@ import WebRTC
 final class WebRTCLivePlayer: LivePlayer {
     let transport: LiveTransport
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
+    private(set) var videoSize: CGSize?
 
     private(set) var state: LivePlayerState = .idle {
         didSet {
@@ -26,12 +28,24 @@ final class WebRTCLivePlayer: LivePlayer {
 
     private var peerConnection: RTCPeerConnection?
     private var observer: PeerConnectionObserver?
+    private var frameObserver: VideoFrameObserver?
+    /// **Must be retained.** `RTCVideoTrack` owns the renderer adapters registered through
+    /// `add(_:)`, and unregisters them when it deallocates. Attaching to a track you don't hold
+    /// compiles, runs, logs nothing, and silently delivers no frames - see `LEARNINGS.md`.
+    private var videoTrack: RTCVideoTrack?
     private var socket: LiveSocket?
     private var tasks: [Task<Void, Never>] = []
     private var isStarted = false
     /// Whether media ever flowed. Decides whether a `.failed` transition means "could never reach
     /// the camera" or "reached it and lost it" - different causes, different things to tell the user.
     private var hasPlayed = false
+    /// `.playing` is promised to mean *pixels on screen*, not merely "ICE succeeded". A peer
+    /// connection can reach `connected` and deliver nothing - a black view that looks identical to
+    /// still-connecting - so both of these must be true before the state advances.
+    private var isConnected = false
+    private var hasVideoFrames = false
+    private var localCandidateCount = 0
+    private var remoteCandidateCount = 0
 
     init(streamName: String, client: FrigateClient) {
         self.transport = .webrtc(streamName: streamName)
@@ -39,6 +53,15 @@ final class WebRTCLivePlayer: LivePlayer {
         self.client = client
         self.renderer = RTCMTLVideoView()
         renderer.videoContentMode = .scaleAspectFill
+
+        self.frameObserver = VideoFrameObserver(
+            onFirstFrame: { [weak self] in
+                Task { @MainActor in self?.markVideoFrameArrived() }
+            },
+            onSize: { [weak self] size in
+                Task { @MainActor in self?.videoSize = size }
+            }
+        )
     }
 
     var view: AnyView {
@@ -55,6 +78,11 @@ final class WebRTCLivePlayer: LivePlayer {
     func stop() {
         isStarted = false
         hasPlayed = false
+        isConnected = false
+        hasVideoFrames = false
+        localCandidateCount = 0
+        remoteCandidateCount = 0
+        videoSize = nil
 
         for task in tasks {
             task.cancel()
@@ -65,6 +93,15 @@ final class WebRTCLivePlayer: LivePlayer {
         // `.closed` transition that is our own doing and that nothing should react to.
         observer?.finish()
         observer = nil
+
+        if let videoTrack {
+            videoTrack.remove(renderer)
+            if let frameObserver {
+                videoTrack.remove(frameObserver)
+            }
+            self.videoTrack = nil
+        }
+        frameObserver?.reset()
 
         peerConnection?.close()
         peerConnection = nil
@@ -90,12 +127,16 @@ final class WebRTCLivePlayer: LivePlayer {
 
     private func connect() async {
         do {
+            let request = try await client.webSocketRequest(for: .webrtcWebSocket(src: streamName))
+            LiveLog.logger.info("opening signaling socket src=\(self.streamName, privacy: .public) url=\(request.url?.absoluteString ?? "nil", privacy: .public) hasCookie=\(request.value(forHTTPHeaderField: "Cookie") != nil, privacy: .public)")
             let socket = try await client.liveSocket(for: .webrtcWebSocket(src: streamName))
             await socket.start()
             self.socket = socket
             let signaling = WebRTCSignaling(channel: socket)
 
-            let observer = PeerConnectionObserver()
+            let observer = PeerConnectionObserver { [weak self] track in
+                Task { @MainActor in self?.attachRenderers(to: track) }
+            }
             self.observer = observer
 
             guard let peerConnection = Self.factory.peerConnection(
@@ -114,11 +155,13 @@ final class WebRTCLivePlayer: LivePlayer {
             let transceiverInit = RTCRtpTransceiverInit()
             transceiverInit.direction = .recvOnly
             let transceiver = peerConnection.addTransceiver(of: .video, init: transceiverInit)
+            LiveLog.logger.info("transceiver=\(transceiver != nil, privacy: .public) track=\(String(describing: transceiver?.receiver.track?.kind), privacy: .public)")
 
             // Under Unified Plan a `recvonly` transceiver's receiver already has its track, so the
             // renderer can be attached now rather than waiting on a delegate callback. Same thing
             // the PWA does with `pc.addTransceiver(kind, {direction:'recvonly'}).receiver.track`.
-            (transceiver?.receiver.track as? RTCVideoTrack)?.add(renderer)
+            // Renderers are attached in `attachRenderers(to:)` when libwebrtc reports the receiver,
+            // not here. See `PeerConnectionObserver.peerConnection(_:didAdd:streams:)`.
 
             tasks.append(Task { await self.forwardLocalEvents(from: observer, to: signaling) })
             tasks.append(Task { await self.applyRemoteSignaling(from: signaling, to: peerConnection) })
@@ -126,7 +169,9 @@ final class WebRTCLivePlayer: LivePlayer {
             let offer = try await peerConnection.offer(for: Self.mediaConstraints)
             try await peerConnection.setLocalDescription(offer)
             try await signaling.send(.offer(sdp: offer.sdp))
+            LiveLog.logger.info("offer sent src=\(self.streamName, privacy: .public)")
         } catch {
+            LiveLog.logger.error("signaling setup failed src=\(self.streamName, privacy: .public) error=\(String(describing: error), privacy: .public)")
             transition(to: .failed(.signalingFailed))
         }
     }
@@ -136,6 +181,8 @@ final class WebRTCLivePlayer: LivePlayer {
         for await event in observer.events {
             switch event {
             case .localCandidate(let sdp):
+                localCandidateCount += 1
+                LiveLog.logger.info("local candidate \(self.localCandidateCount, privacy: .public): \(sdp, privacy: .public)")
                 // A candidate we can't deliver is not fatal on its own - the peer connection may
                 // still succeed on candidates already exchanged, and if it doesn't, the connection
                 // state will say so with a better error than this would.
@@ -153,10 +200,17 @@ final class WebRTCLivePlayer: LivePlayer {
             do {
                 switch message {
                 case .answer(let sdp):
+                    let codecs = sdp
+                        .split(separator: "\r\n")
+                        .filter { $0.hasPrefix("a=rtpmap:") }
+                        .joined(separator: " ")
+                    LiveLog.logger.info("answer received src=\(self.streamName, privacy: .public) codecs=\(codecs, privacy: .public)")
                     try await peerConnection.setRemoteDescription(
                         RTCSessionDescription(type: .answer, sdp: sdp)
                     )
                 case .candidate(let candidate):
+                    remoteCandidateCount += 1
+                    LiveLog.logger.info("remote candidate \(self.remoteCandidateCount, privacy: .public): \(candidate, privacy: .public)")
                     // go2rtc sends candidates with no sdpMid or sdpMLineIndex. The PWA supplies
                     // `sdpMid: "0"`; with `maxBundle` there is exactly one bundled m-line, so index
                     // 0 is not a guess.
@@ -167,6 +221,7 @@ final class WebRTCLivePlayer: LivePlayer {
                     continue
                 }
             } catch {
+                LiveLog.logger.error("applying remote signaling failed error=\(String(describing: error), privacy: .public)")
                 transition(to: .failed(.signalingFailed))
                 return
             }
@@ -181,12 +236,18 @@ final class WebRTCLivePlayer: LivePlayer {
     }
 
     private func apply(_ connectionState: RTCPeerConnectionState) {
+        LiveLog.logger.info("connection state=\(connectionState.rawValue, privacy: .public) src=\(self.streamName, privacy: .public) local=\(self.localCandidateCount, privacy: .public) remote=\(self.remoteCandidateCount, privacy: .public) frames=\(self.hasVideoFrames, privacy: .public)")
         switch connectionState {
         case .connected:
-            hasPlayed = true
-            transition(to: .playing)
+            isConnected = true
+            advanceIfShowingVideo()
+            tasks.append(Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                await self?.logInboundStats()
+            })
         case .disconnected:
             // Recoverable by design: libwebrtc keeps trying, and often recovers without help.
+            isConnected = false
             transition(to: .stalled)
         case .failed:
             // Negotiated, but no candidate pair ever connected. If media never flowed, that is
@@ -198,6 +259,58 @@ final class WebRTCLivePlayer: LivePlayer {
         @unknown default:
             break
         }
+    }
+
+    /// Hooks the on-screen view and the frame observer up to the remote track.
+    private func attachRenderers(to track: RTCVideoTrack) {
+        LiveLog.logger.info("remote video track attached src=\(self.streamName, privacy: .public)")
+        videoTrack = track
+        track.add(renderer)
+        // A second renderer on the same track, purely to observe. See `VideoFrameObserver` for why
+        // the on-screen view can't be trusted to report this itself.
+        if let frameObserver {
+            track.add(frameObserver)
+        }
+    }
+
+    /// Is media actually arriving, and is anything decoding it?
+    ///
+    /// Worth its keep: this line is what separated "the media path is blocked" from "the media path
+    /// works and our renderer was never wired up" while chasing a silent black stream. On screen
+    /// those are identical, and without numbers the natural conclusion is the wrong one.
+    private func logInboundStats() async {
+        guard let peerConnection else { return }
+        let report = await peerConnection.statistics()
+        for (_, stats) in report.statistics where stats.type == "inbound-rtp" {
+            let bytes = stats.values["bytesReceived"].map(String.init(describing:)) ?? "?"
+            let received = stats.values["framesReceived"].map(String.init(describing:)) ?? "?"
+            let decoded = stats.values["framesDecoded"].map(String.init(describing:)) ?? "?"
+            let width = stats.values["frameWidth"].map(String.init(describing:)) ?? "?"
+            LiveLog.logger.info("inbound-rtp bytes=\(bytes, privacy: .public) received=\(received, privacy: .public) decoded=\(decoded, privacy: .public) width=\(width, privacy: .public)")
+        }
+    }
+
+    private func markVideoFrameArrived() {
+        LiveLog.logger.info("first video frame src=\(self.streamName, privacy: .public)")
+        hasVideoFrames = true
+        advanceIfShowingVideo()
+    }
+
+    /// Only claim `.playing` once the connection is up *and* a frame has actually arrived. Until
+    /// both hold, the caller keeps showing the snapshot, which is the truthful picture.
+    ///
+    /// Connected-without-frames reports `.stalled` rather than staying `.connecting`, because the
+    /// two mean different things to whoever is deciding what went wrong: still connecting could be
+    /// a blocked media path, whereas connected-and-silent proves the path works and points at the
+    /// camera instead.
+    private func advanceIfShowingVideo() {
+        guard isConnected else { return }
+        guard hasVideoFrames else {
+            transition(to: .stalled)
+            return
+        }
+        hasPlayed = true
+        transition(to: .playing)
     }
 
     // MARK: libwebrtc setup

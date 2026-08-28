@@ -2,11 +2,13 @@ import SwiftUI
 
 struct CameraListView: View {
     let client: FrigateClient
+    let config: FrigateConfig
     @State private var model: CameraGridModel
 
-    init(client: FrigateClient, cameraNames: [String]) {
+    init(client: FrigateClient, config: FrigateConfig) {
         self.client = client
-        _model = State(wrappedValue: CameraGridModel(client: client, cameraNames: cameraNames))
+        self.config = config
+        _model = State(wrappedValue: CameraGridModel(client: client, cameraNames: config.enabledCameraNames))
     }
 
     var body: some View {
@@ -32,7 +34,7 @@ struct CameraListView: View {
                             LazyVStack(spacing: 16) {
                                 ForEach(model.cameraNames, id: \.self) { name in
                                     NavigationLink {
-                                        CameraDetailView(client: client, cameraName: name)
+                                        CameraDetailView(client: client, cameraName: name, config: config)
                                     } label: {
                                         CameraRow(state: model.snapshots[name] ?? .loading)
                                     }

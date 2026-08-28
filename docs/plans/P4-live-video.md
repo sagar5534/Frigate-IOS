@@ -259,8 +259,10 @@ P2 snapshot loop. One live player, focused camera only.
   closed, socket closed, tasks cancelled). **Milestone: kill wifi mid-stream and it recovers;
   block 8555 and it fails within seconds with a message that names the cause.**
 
-_P4 milestone (all chunks): open a camera and watch it live, with automatic recovery after a
-network blip and a truthful, specific failure when WebRTC cannot connect._
+_P4 milestone: **met and verified end to end** against `frigate.sagarp.ca` in the simulator - tap a
+camera, snapshot immediately, live H.264 within ~2s, fullscreen, back out with the snapshot loop
+resuming. The two bugs that mattered were both invisible to unit tests and to reasoning; only
+running it found them (see `LEARNINGS.md`)._
 
 ---
 
@@ -495,7 +497,7 @@ contract (`stop()` before `start()`, repeated `stop()`, idempotent `start()`, no
 an unchanged state). C3's actual milestone - a moving picture - needs the real server, and the C2
 gate above is still unrun.
 
-## C4 - Wire into camera detail (SUMMARY)
+## C4 - Wire into camera detail (BUILT)
 
 `LiveCameraModel` resolves the ladder from `AppModel`'s config, asks `LivePlayerFactory` for a
 player, and owns start/stop. `LiveCameraView` stacks the live surface over the existing snapshot
@@ -505,7 +507,7 @@ Activity strip's `AVPlayerLayer`, see `LEARNINGS.md`). The snapshot poll stops o
 `.playing` and resumes if live fails. Tap to fullscreen; `.notAvailable` keeps the P2 snapshot
 experience unchanged rather than showing an error.
 
-## C5 - Reconnect, teardown, honest failure (SUMMARY)
+## C5 - Reconnect, teardown, honest failure (BUILT)
 
 Exponential backoff on `connectionLost`. A startup deadline (the PWA uses 5s) that resolves to
 `.failed(.iceFailed)` rather than spinning, and a stall deadline (3s without frames) that shows

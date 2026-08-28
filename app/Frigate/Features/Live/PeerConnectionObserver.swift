@@ -24,11 +24,31 @@ nonisolated final class PeerConnectionObserver: NSObject, RTCPeerConnectionDeleg
     let events: AsyncStream<PeerConnectionEvent>
     private let continuation: AsyncStream<PeerConnectionEvent>.Continuation
 
-    override init() {
+    /// The remote video track, handed over the moment libwebrtc creates its receiver.
+    ///
+    /// Not routed through `events`: `RTCVideoTrack` is a non-`Sendable` reference type, and this is
+    /// a one-shot handoff where ordering against the state transitions doesn't matter.
+    private let onVideoTrack: @Sendable (RTCVideoTrack) -> Void
+
+    init(onVideoTrack: @escaping @Sendable (RTCVideoTrack) -> Void) {
         let (events, continuation) = AsyncStream<PeerConnectionEvent>.makeStream()
         self.events = events
         self.continuation = continuation
+        self.onVideoTrack = onVideoTrack
         super.init()
+    }
+
+    /// The canonical place to pick up a remote track. Attaching renderers to the track reachable
+    /// from `addTransceiver(...)?.receiver.track` looks equivalent and is not: measured against a
+    /// real camera, that track decoded 73 frames without ever calling a renderer attached to it.
+    /// This callback hands over the track libwebrtc actually feeds.
+    func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didAdd rtpReceiver: RTCRtpReceiver,
+        streams mediaStreams: [RTCMediaStream]
+    ) {
+        guard let track = rtpReceiver.track as? RTCVideoTrack else { return }
+        onVideoTrack(track)
     }
 
     /// Ends the event stream so the player's consuming loop exits. Called during teardown, before
