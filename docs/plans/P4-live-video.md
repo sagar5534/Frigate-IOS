@@ -430,7 +430,16 @@ server hanging up mid-handshake terminating cleanly.
 Still to do in C3: remote candidates carry no `sdpMid`, so supply `"0"` when applying them, as the
 PWA does.
 
-**Real-server gate (before C3, and it is what justifies the binary dependency):**
+**Real-server gate: PASSED** against `frigate.sagarp.ca`. The signaling socket opens through nginx
+`auth_request` with the session cookie, and is refused without it - so cookie-authed WebSockets work
+and the route really is protected. All 9 cameras resolve to WebRTC, and **every one declares
+`Main Stream`/`Sub Stream`**, which turned C1's tiebreak from theoretical into load-bearing: sorting
+stream names got them right only because `cam2` is a prefix of `cam2_sub`. Resolution now prefers
+the stream *label*, which is the user's own statement of intent. (Note the account is `admin`,
+lowercase - Frigate's `User.get_by_id` is case-sensitive, and a wrong case looks exactly like a
+wrong password.)
+
+**How the gate is run:**
 `LiveServerIntegrationTests` opens the signaling socket against a real server using the stream name
 C1's resolution picked from the live `/api/config`, and pings it - a pong only round-trips once the
 HTTP upgrade succeeded, which distinguishes "nginx let us through" from "nginx returned 401"

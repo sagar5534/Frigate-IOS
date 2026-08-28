@@ -50,31 +50,54 @@ nonisolated enum LiveStreamSource {
     ///    config typo and a permanent spinner.
     /// 2. A candidate named after the camera wins. That is Frigate's own default mapping
     ///    (`config.py:990` writes `{name: name}`) and the near-universal convention for a
-    ///    camera's main stream, so it matches the PWA's pick for the overwhelming majority of
-    ///    configs, single-stream ones included.
-    /// 3. Otherwise the alphabetically first candidate, purely so the answer is stable.
+    ///    camera's main stream.
+    /// 3. Otherwise the **label** decides, because the label is the user's own description of
+    ///    what each stream is for - the closest thing to their intent we have once order is gone.
+    ///    A label reading as a main/high stream beats one reading as a sub/low stream.
+    /// 4. Otherwise the alphabetically first candidate, purely so the answer is stable.
     ///
-    /// Step 3 is a guess, and for a multi-stream camera we may open a different stream than the
-    /// PWA would. The real fix is letting the user choose (P8 stream picker) - `live.streams`
-    /// keeps every label for exactly that.
+    /// Step 3 is not theoretical: on a real 9-camera server *every* camera declared
+    /// `Main Stream=camN, Sub Stream=camN_sub`, so this path runs for all of them. Sorting stream
+    /// names would happen to get those right only because `cam2` is a prefix of `cam2_sub`; rename
+    /// them `hi`/`lo` and it silently opens the low-res stream instead.
+    ///
+    /// It is still a heuristic. The real fix is letting the user choose (P8 stream picker), which
+    /// is why `live.streams` keeps every label rather than collapsing to the winner.
     private static func restreamedStreamName(camera: String, config: FrigateConfig) -> String? {
         let restreams = config.go2rtc.streamNames
-        let configured = config.cameras[camera]?.live.streams.map(\.name) ?? []
+        let declared = config.cameras[camera]?.live.streams ?? []
 
-        guard !configured.isEmpty else {
+        guard !declared.isEmpty else {
             // No mapping at all - an older or partial payload, since a real server fills this with
             // `{name: name}`. Apply that same default before giving up.
             return restreams.contains(camera) ? camera : nil
         }
 
-        let candidates = configured.filter(restreams.contains)
-        if candidates.contains(camera) {
+        let candidates = declared.filter { restreams.contains($0.name) }
+        if candidates.contains(where: { $0.name == camera }) {
             return camera
+        }
+        if let preferred = candidates.filter({ isMainStreamLabel($0.label) }).map(\.name).sorted().first {
+            return preferred
         }
         // Note this deliberately does *not* fall back to the camera name when the camera declared
         // streams and none of them exist. That is a config error, and quietly playing a stream the
         // user did not ask for would hide it - the PWA drops such a camera to jsmpeg for the same
         // reason. MJPEG (P4.2) is our equivalent.
-        return candidates.sorted().first
+        return candidates.map(\.name).sorted().first
+    }
+
+    /// Does this label read as a camera's primary stream rather than a downscaled one?
+    ///
+    /// Keyword matching, which is exactly as crude as it sounds - but it is matching against text a
+    /// human wrote to describe their own streams, using the vocabulary Frigate's own documentation
+    /// uses (`Main Stream` / `Sub Stream`). That beats inferring quality from a stream *name* like
+    /// `cam2_sub`, which is an identifier and carries no promise of meaning anything at all.
+    private static func isMainStreamLabel(_ label: String) -> Bool {
+        let normalized = label.lowercased()
+        let subStreamWords = ["sub", "low", "secondary", "sd", "small", "detect"]
+        guard !subStreamWords.contains(where: normalized.contains) else { return false }
+        let mainStreamWords = ["main", "high", "primary", "hd", "4k", "full", "hi"]
+        return mainStreamWords.contains(where: normalized.contains)
     }
 }

@@ -112,10 +112,11 @@ three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
 - [x] C2 - go2rtc signaling - `SignalingMessage` codec + `WebRTCSignaling` (buffers candidates that
   arrive before the answer, since `RTCPeerConnection.add(_:)` rejects those), tested against
   `FakeSignalingChannel`. 157 tests (2 skipped).
-  **Gate still open:** `LiveServerIntegrationTests` proves the socket opens through nginx
-  `auth_request` with the session cookie and is refused without it, but it is opt-in (needs
-  `FRIGATE_TEST_URL`/`_USER`/`_PASSWORD`) and has not been run against the real server yet.
-  Run it before starting C3 - it is what justifies adding the libwebrtc binary
+  **Gate passed against frigate.sagarp.ca:** the signaling socket opens through nginx
+  `auth_request` with the session cookie and is refused without it, so cookie-authed WebSockets
+  work and the route really is protected. All 9 cameras resolve to WebRTC. Every one of them
+  declares `Main Stream`/`Sub Stream`, which made C1's tiebreak load-bearing in practice and led to
+  preferring the stream *label* over sorting stream names
 - [x] C3 - WebRTC dependency + player - `stasel/WebRTC` pinned at 151.0.0 (12MB on the arm64
   release slice, not the ~30MB the plan assumed); `PeerConnectionObserver` bridges libwebrtc's
   delegate onto an ordered `AsyncStream`; `WebRTCLivePlayer` does recvonly-video negotiation and

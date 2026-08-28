@@ -87,9 +87,14 @@ final class LiveServerIntegrationTests: XCTestCase {
         try await client.login(user: server.user, password: server.password)
         let config = try await client.fetchConfig()
 
+        // Print what every camera declares alongside what we picked. The declared list is the part
+        // that matters: `LiveStreamSource` only has to guess when a camera offers several streams
+        // and none is named after the camera, so this is how we find out whether that guess is
+        // actually load-bearing on a real config or purely theoretical.
         let resolved = config.enabledCameraNames.map { ($0, LiveStreamSource.ladder(camera: $0, config: config)) }
         for (camera, ladder) in resolved {
-            print("[P4] \(camera) -> \(ladder.first.map(String.init(describing:)) ?? "none")")
+            let declared = config.cameras[camera]?.live.streams.map { "\($0.label)=\($0.name)" } ?? []
+            print("[P4] \(camera) -> \(ladder.first.map(String.init(describing:)) ?? "none") | declared: \(declared.joined(separator: ", "))")
         }
 
         let restreamed = resolved.compactMap { camera, ladder -> String? in

@@ -118,6 +118,91 @@ final class LiveTransportTests: XCTestCase {
                        .webrtc(streamName: "front_door"))
     }
 
+    /// The exact shape of a real 9-camera server: every camera declares a main and a sub stream,
+    /// neither named after the camera. Sorting stream names gets this right only by accident -
+    /// `cam2` is a prefix of `cam2_sub` - so the label is what has to decide.
+    func testMainStreamLabelWinsOverSubStreamOnRealWorldConfigShape() throws {
+        let config = try config(
+            cameras: """
+            {"Front": {"live": {"streams": {
+              "Main Stream": "cam2",
+              "Sub Stream": "cam2_sub"
+            }}}}
+            """,
+            go2rtcStreams: #"{"cam2": "rtsp://cam/hi", "cam2_sub": "rtsp://cam/lo"}"#
+        )
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "Front", config: config).first,
+                       .webrtc(streamName: "cam2"))
+    }
+
+    /// The case that proves the label is doing the work rather than the name's sort order: here the
+    /// main stream's name sorts *after* the sub stream's, so a name-sorting implementation opens
+    /// the low-res feed.
+    func testMainStreamWinsEvenWhenItsNameSortsAfterTheSubStream() throws {
+        let config = try config(
+            cameras: """
+            {"Front": {"live": {"streams": {
+              "Main Stream": "zulu_hi",
+              "Sub Stream": "alpha_lo"
+            }}}}
+            """,
+            go2rtcStreams: #"{"zulu_hi": "rtsp://cam/hi", "alpha_lo": "rtsp://cam/lo"}"#
+        )
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "Front", config: config).first,
+                       .webrtc(streamName: "zulu_hi"))
+    }
+
+    func testCommonQualityLabelVocabulariesAllResolveToTheHigherStream() throws {
+        let vocabularies = [
+            ("High", "Low"), ("HD", "SD"), ("4K", "Sub"), ("Primary", "Secondary"), ("Full", "Detect"),
+        ]
+        for (mainLabel, subLabel) in vocabularies {
+            let config = try config(
+                cameras: """
+                {"Front": {"live": {"streams": {
+                  "\(mainLabel)": "zulu_main",
+                  "\(subLabel)": "alpha_sub"
+                }}}}
+                """,
+                go2rtcStreams: #"{"zulu_main": "rtsp://cam/hi", "alpha_sub": "rtsp://cam/lo"}"#
+            )
+            XCTAssertEqual(
+                LiveStreamSource.ladder(camera: "Front", config: config).first,
+                .webrtc(streamName: "zulu_main"),
+                "\(mainLabel)/\(subLabel) should resolve to the main stream"
+            )
+        }
+    }
+
+    /// Labels that say nothing useful. There is no intent to read, so the only requirement left is
+    /// that the answer is stable rather than hash-ordered.
+    func testUninformativeLabelsStillResolveDeterministically() throws {
+        let cameras = """
+        {"Front": {"live": {"streams": {"zebra": "cam_b", "alpha": "cam_a"}}}}
+        """
+        let streams = #"{"cam_a": "rtsp://cam/a", "cam_b": "rtsp://cam/b"}"#
+        let first = LiveStreamSource.ladder(camera: "Front", config: try config(cameras: cameras, go2rtcStreams: streams))
+        let second = LiveStreamSource.ladder(camera: "Front", config: try config(cameras: cameras, go2rtcStreams: streams))
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.first, .webrtc(streamName: "cam_a"))
+    }
+
+    /// A camera-named stream still outranks the label rule: it is Frigate's own default mapping,
+    /// and a user who kept that default did not choose a label at all.
+    func testCameraNamedStreamStillOutranksAMainStreamLabel() throws {
+        let config = try config(
+            cameras: """
+            {"Front": {"live": {"streams": {
+              "Main Stream": "other_hi",
+              "Whatever": "Front"
+            }}}}
+            """,
+            go2rtcStreams: #"{"other_hi": "rtsp://cam/hi", "Front": "rtsp://cam/native"}"#
+        )
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "Front", config: config).first,
+                       .webrtc(streamName: "Front"))
+    }
+
     func testUnknownCameraFallsToMJPEGRatherThanCrashing() throws {
         let config = try config(cameras: "{}", go2rtcStreams: #"{"front_door": "rtsp://cam/live"}"#)
         XCTAssertEqual(LiveStreamSource.ladder(camera: "ghost", config: config), [.mjpeg(camera: "ghost")])
