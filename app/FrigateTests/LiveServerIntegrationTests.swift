@@ -6,12 +6,16 @@ import XCTest
 /// actually refused without one? No unit test can answer either question, and the answer decides
 /// whether C3's binary dependency is worth adding.
 ///
-/// Skipped unless the environment names a server, so the normal suite stays hermetic and offline:
+/// Skipped unless the environment names a server, so the normal suite stays hermetic and offline.
+///
+/// **The `TEST_RUNNER_` prefix is required.** `xcodebuild` does not forward the invoking shell's
+/// environment into the test process; variables prefixed `TEST_RUNNER_` on its command line are
+/// forwarded with the prefix stripped, and nothing else is. Without it these tests silently skip.
 ///
 /// ```
-/// FRIGATE_TEST_URL=https://frigate.example.com \
-/// FRIGATE_TEST_USER=admin \
-/// FRIGATE_TEST_PASSWORD=… \
+/// TEST_RUNNER_FRIGATE_TEST_URL=https://frigate.example.com \
+/// TEST_RUNNER_FRIGATE_TEST_USER=admin \
+/// TEST_RUNNER_FRIGATE_TEST_PASSWORD=… \
 /// xcodebuild -project app/Frigate.xcodeproj -scheme Frigate \
 ///   -destination 'platform=iOS Simulator,name=iPhone 17' \
 ///   -only-testing:FrigateTests/LiveServerIntegrationTests test
@@ -35,7 +39,11 @@ final class LiveServerIntegrationTests: XCTestCase {
 
     private func requireServer() throws -> Server {
         guard let server = Server.fromEnvironment() else {
-            throw XCTSkip("set FRIGATE_TEST_URL / FRIGATE_TEST_USER / FRIGATE_TEST_PASSWORD to run the live-server checks")
+            throw XCTSkip("""
+                set TEST_RUNNER_FRIGATE_TEST_URL / _USER / _PASSWORD to run the live-server checks. \
+                The TEST_RUNNER_ prefix is required: xcodebuild forwards only those into the test \
+                process, stripping the prefix, and ignores the rest of the invoking shell's env.
+                """)
         }
         return server
     }

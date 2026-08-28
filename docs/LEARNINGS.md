@@ -249,3 +249,30 @@ every label so a stream picker (P8) can replace the guess with a choice.
 
 The general lesson: if a JSON object's key *order* carries meaning, decode it into an ordered
 representation with an explicit ordering rule you chose. Never let `allKeys` order reach behaviour.
+
+## `xcodebuild` ignores your shell's environment; test env vars need a `TEST_RUNNER_` prefix
+
+P4's opt-in live-server checks (`LiveServerIntegrationTests`) read `FRIGATE_TEST_URL` and friends
+from `ProcessInfo.processInfo.environment` and `XCTSkip` when they're missing. Invoked the obvious
+way:
+
+```bash
+FRIGATE_TEST_URL=… xcodebuild … -only-testing:FrigateTests/LiveServerIntegrationTests test
+```
+
+both tests skipped. The variables reach `xcodebuild` itself but not the process the test bundle
+runs in, so `ProcessInfo` never sees them. The fix is the `TEST_RUNNER_` prefix, which xcodebuild
+forwards into the test runner **with the prefix stripped**:
+
+```bash
+TEST_RUNNER_FRIGATE_TEST_URL=… xcodebuild … test
+```
+
+Verified empirically by pointing it at a nonexistent host: with the prefix the tests ran and failed
+on DNS, without it they skipped.
+
+The trap is the reporting, not the mechanism. A run where every test skipped still prints
+`** TEST SUCCEEDED **`, so an opt-in integration check that silently opted itself out looks exactly
+like one that passed. Any `XCTSkip` guarding a check that *matters* should say in its message how to
+actually run it - and when a skip is the answer to a question you asked, confirm it ran before
+believing the green.

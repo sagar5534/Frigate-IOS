@@ -438,11 +438,15 @@ without needing an SDP offer we cannot produce yet. Its sibling asserts the sock
 without the cookie. Both skip unless the environment names a server, so the suite stays hermetic:
 
 ```bash
-FRIGATE_TEST_URL=https://frigate.sagarp.ca FRIGATE_TEST_USER=… FRIGATE_TEST_PASSWORD=… \
+TEST_RUNNER_FRIGATE_TEST_URL=https://frigate.sagarp.ca \
+TEST_RUNNER_FRIGATE_TEST_USER=… TEST_RUNNER_FRIGATE_TEST_PASSWORD=… \
   xcodebuild -project "app/Frigate.xcodeproj" -scheme Frigate \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
   -only-testing:FrigateTests/LiveServerIntegrationTests test
 ```
+
+The `TEST_RUNNER_` prefix is not optional - see `LEARNINGS.md`. Without it the tests skip silently
+and the run still reports `TEST SUCCEEDED`.
 
 It also prints the resolved transport for every enabled camera, which is the first real check of
 C1's resolution against a live config rather than a fixture.
