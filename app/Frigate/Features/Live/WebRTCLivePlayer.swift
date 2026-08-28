@@ -13,7 +13,14 @@ import WebRTC
 final class WebRTCLivePlayer: LivePlayer {
     let transport: LiveTransport
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
-    private(set) var videoSize: CGSize?
+    var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
+
+    private(set) var videoSize: CGSize? {
+        didSet {
+            guard let videoSize, videoSize != oldValue else { return }
+            onVideoSizeChange?(videoSize)
+        }
+    }
 
     private(set) var state: LivePlayerState = .idle {
         didSet {
@@ -46,6 +53,12 @@ final class WebRTCLivePlayer: LivePlayer {
     private var hasVideoFrames = false
     private var localCandidateCount = 0
     private var remoteCandidateCount = 0
+    private var frameWatchdog: Task<Void, Never>?
+    private var statsProbe: Task<Void, Never>?
+    /// Longest gap between frames a live stream may have before it counts as stalled. Generous
+    /// enough for a low-frame-rate camera and a bad moment on wifi; short enough that a frozen
+    /// picture is caught before anyone trusts it.
+    private static let frameWatchdogInterval: Duration = .seconds(5)
 
     init(streamName: String, client: FrigateClient) {
         self.transport = .webrtc(streamName: streamName)
@@ -83,6 +96,11 @@ final class WebRTCLivePlayer: LivePlayer {
         localCandidateCount = 0
         remoteCandidateCount = 0
         videoSize = nil
+        frameObserver?.reset()
+        frameWatchdog?.cancel()
+        frameWatchdog = nil
+        statsProbe?.cancel()
+        statsProbe = nil
 
         for task in tasks {
             task.cancel()
@@ -101,7 +119,6 @@ final class WebRTCLivePlayer: LivePlayer {
             }
             self.videoTrack = nil
         }
-        frameObserver?.reset()
 
         peerConnection?.close()
         peerConnection = nil
@@ -125,12 +142,33 @@ final class WebRTCLivePlayer: LivePlayer {
 
     // MARK: Connection
 
+    /// Abandons a connection attempt that `stop()` overtook, tearing down whatever it had already
+    /// built.
+    ///
+    /// None of `connect()`'s awaits are cancellable suspension points - they are actor hops and
+    /// continuation-wrapped ObjC callbacks - so a cancelled task runs to completion regardless.
+    /// Without this check a `stop()` mid-connect leaves an open socket and an ICE-gathering peer
+    /// connection assigned to a player the model has already released, with no handle left to close
+    /// them: a silent, permanent leak that repeats every time it happens.
+    private func abandonIfStopped(socket: LiveSocket?, peerConnection: RTCPeerConnection?) -> Bool {
+        guard !isStarted else { return false }
+        LiveLog.logger.info("connect abandoned after teardown src=\(self.streamName, privacy: .public)")
+        peerConnection?.close()
+        if let socket {
+            Task { await socket.close() }
+        }
+        return true
+    }
+
     private func connect() async {
         do {
             let request = try await client.webSocketRequest(for: .webrtcWebSocket(src: streamName))
+            guard !abandonIfStopped(socket: nil, peerConnection: nil) else { return }
             LiveLog.logger.info("opening signaling socket src=\(self.streamName, privacy: .public) url=\(request.url?.absoluteString ?? "nil", privacy: .public) hasCookie=\(request.value(forHTTPHeaderField: "Cookie") != nil, privacy: .public)")
             let socket = try await client.liveSocket(for: .webrtcWebSocket(src: streamName))
+            guard !abandonIfStopped(socket: socket, peerConnection: nil) else { return }
             await socket.start()
+            guard !abandonIfStopped(socket: socket, peerConnection: nil) else { return }
             self.socket = socket
             let signaling = WebRTCSignaling(channel: socket)
 
@@ -160,16 +198,26 @@ final class WebRTCLivePlayer: LivePlayer {
             // Under Unified Plan a `recvonly` transceiver's receiver already has its track, so the
             // renderer can be attached now rather than waiting on a delegate callback. Same thing
             // the PWA does with `pc.addTransceiver(kind, {direction:'recvonly'}).receiver.track`.
-            // Renderers are attached in `attachRenderers(to:)` when libwebrtc reports the receiver,
-            // not here. See `PeerConnectionObserver.peerConnection(_:didAdd:streams:)`.
+            // Renderers are deliberately *not* attached from `transceiver.receiver.track` here -
+            // that track decoded 73 frames without ever calling a renderer added to it. They attach
+            // in `attachRenderers(to:)` when libwebrtc reports the receiver. See `LEARNINGS.md`.
 
-            tasks.append(Task { await self.forwardLocalEvents(from: observer, to: signaling) })
             tasks.append(Task { await self.applyRemoteSignaling(from: signaling, to: peerConnection) })
 
             let offer = try await peerConnection.offer(for: Self.mediaConstraints)
+            guard !abandonIfStopped(socket: socket, peerConnection: peerConnection) else { return }
             try await peerConnection.setLocalDescription(offer)
+            guard !abandonIfStopped(socket: socket, peerConnection: peerConnection) else { return }
             try await signaling.send(.offer(sdp: offer.sdp))
             LiveLog.logger.info("offer sent src=\(self.streamName, privacy: .public)")
+
+            // Only now start trickling our candidates. go2rtc creates its peer connection when it
+            // handles `webrtc/offer`, so a candidate that overtakes the offer has nothing to attach
+            // to and is dropped - and on a LAN the host candidate it drops may be the only one that
+            // would have worked. libwebrtc can fire `OnIceCandidate` before `setLocalDescription`
+            // returns, so ordering here is not theoretical. The PWA is safe from this by accident:
+            // its offer chain is microtasks and candidate events are macrotasks.
+            tasks.append(Task { await self.forwardLocalEvents(from: observer, to: signaling) })
         } catch {
             LiveLog.logger.error("signaling setup failed src=\(self.streamName, privacy: .public) error=\(String(describing: error), privacy: .public)")
             transition(to: .failed(.signalingFailed))
@@ -240,24 +288,59 @@ final class WebRTCLivePlayer: LivePlayer {
         switch connectionState {
         case .connected:
             isConnected = true
-            advanceIfShowingVideo()
-            tasks.append(Task { [weak self] in
+            statsProbe?.cancel()
+            statsProbe = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(4))
                 await self?.logInboundStats()
-            })
+            }
+        case .disconnected:
+            // Clearing the frame latch matters: if ICE recovers while the camera has stopped
+            // sending, a stale `true` would re-report `.playing` over a frozen picture.
+            isConnected = false
+            hasVideoFrames = false
+        default:
+            break
+        }
+
+        if let next = Self.nextState(
+            for: connectionState,
+            hasPlayed: hasPlayed,
+            hasVideoFrames: hasVideoFrames
+        ) {
+            if next == .playing {
+                hasPlayed = true
+            }
+            transition(to: next)
+        }
+    }
+
+    /// The whole connection-state mapping as a pure function, so the decisions that produce this
+    /// phase's user-facing error messages can be tested without a server or a peer connection.
+    ///
+    /// `nil` means "no state change" - `.new`, `.connecting` and `.closed` are all transitions we
+    /// either already reported or caused ourselves.
+    nonisolated static func nextState(
+        for connectionState: RTCPeerConnectionState,
+        hasPlayed: Bool,
+        hasVideoFrames: Bool
+    ) -> LivePlayerState? {
+        switch connectionState {
+        case .connected:
+            // Connected-without-frames is `.stalled`, not `.connecting`. The two mean different
+            // things to whoever is diagnosing it: still connecting could be a blocked media path,
+            // whereas connected-and-silent proves the path works and points at the camera.
+            return hasVideoFrames ? .playing : .stalled
         case .disconnected:
             // Recoverable by design: libwebrtc keeps trying, and often recovers without help.
-            isConnected = false
-            transition(to: .stalled)
+            return .stalled
         case .failed:
-            // Negotiated, but no candidate pair ever connected. If media never flowed, that is
-            // almost always port 8555 being unreachable from wherever the phone is - the one
-            // failure with a cause worth naming out loud (C5 writes that copy).
-            transition(to: .failed(hasPlayed ? .connectionLost : .iceFailed))
+            // If media never flowed, no candidate pair ever connected - almost always port 8555
+            // being unreachable from wherever the phone is. If it did, a working stream dropped.
+            return .failed(hasPlayed ? .connectionLost : .iceFailed)
         case .new, .connecting, .closed:
-            break
+            return nil
         @unknown default:
-            break
+            return nil
         }
     }
 
@@ -291,24 +374,40 @@ final class WebRTCLivePlayer: LivePlayer {
     }
 
     private func markVideoFrameArrived() {
+        guard !hasVideoFrames else { return }
         LiveLog.logger.info("first video frame src=\(self.streamName, privacy: .public)")
         hasVideoFrames = true
+        startFrameWatchdog()
         advanceIfShowingVideo()
+    }
+
+    /// Reports `.stalled` when frames stop arriving on a connection that is still nominally up.
+    ///
+    /// ICE consent keeps a peer connection `connected` long after RTP has stopped, so without this
+    /// a camera that quietly stops sending leaves a frozen picture claiming `.playing` forever -
+    /// the worst kind of failure, because it looks like success.
+    private func startFrameWatchdog() {
+        frameWatchdog?.cancel()
+        frameWatchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.frameWatchdogInterval)
+                guard !Task.isCancelled, let self,
+                      let lastFrameAt = self.frameObserver?.lastFrameAt
+                else { return }
+                if ContinuousClock.now - lastFrameAt > Self.frameWatchdogInterval {
+                    LiveLog.logger.info("frames stopped src=\(self.streamName, privacy: .public)")
+                    self.hasVideoFrames = false
+                    self.transition(to: .stalled)
+                    return
+                }
+            }
+        }
     }
 
     /// Only claim `.playing` once the connection is up *and* a frame has actually arrived. Until
     /// both hold, the caller keeps showing the snapshot, which is the truthful picture.
-    ///
-    /// Connected-without-frames reports `.stalled` rather than staying `.connecting`, because the
-    /// two mean different things to whoever is deciding what went wrong: still connecting could be
-    /// a blocked media path, whereas connected-and-silent proves the path works and points at the
-    /// camera instead.
     private func advanceIfShowingVideo() {
-        guard isConnected else { return }
-        guard hasVideoFrames else {
-            transition(to: .stalled)
-            return
-        }
+        guard isConnected, hasVideoFrames else { return }
         hasPlayed = true
         transition(to: .playing)
     }

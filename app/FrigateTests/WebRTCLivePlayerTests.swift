@@ -1,3 +1,4 @@
+import WebRTC
 import XCTest
 @testable import Frigate
 
@@ -16,6 +17,7 @@ final class WebRTCLivePlayerTests: XCTestCase {
     override func tearDown() async throws {
         player?.stop()
         player = nil
+        MockURLProtocol.requestHandler = nil
         try await super.tearDown()
     }
 
@@ -43,6 +45,60 @@ final class WebRTCLivePlayerTests: XCTestCase {
 
     func testFactoryReturnsNilForAnEmptyLadder() {
         XCTAssertNil(LivePlayerFactory().makePlayer(for: [], client: makeClient()))
+    }
+
+    // MARK: Connection-state mapping
+    //
+    // The pure half of the player's state machine: the decisions that choose which failure the user
+    // is shown. Getting these wrong is how someone ends up reconfiguring a router that was fine.
+
+    func testConnectedWithFramesIsPlaying() {
+        XCTAssertEqual(
+            WebRTCLivePlayer.nextState(for: .connected, hasPlayed: false, hasVideoFrames: true),
+            .playing
+        )
+    }
+
+    /// Connected but silent is *not* "still connecting": the media path demonstrably works, so the
+    /// camera is the suspect. Reporting `.connecting` here is what would let a deadline blame the
+    /// network for a connection that had already succeeded.
+    func testConnectedWithoutFramesIsStalledNotConnecting() {
+        XCTAssertEqual(
+            WebRTCLivePlayer.nextState(for: .connected, hasPlayed: false, hasVideoFrames: false),
+            .stalled
+        )
+    }
+
+    func testFailureBeforeAnyVideoIsAttributedToICE() {
+        XCTAssertEqual(
+            WebRTCLivePlayer.nextState(for: .failed, hasPlayed: false, hasVideoFrames: false),
+            .failed(.iceFailed)
+        )
+    }
+
+    func testFailureAfterVideoPlayedIsALostConnection() {
+        XCTAssertEqual(
+            WebRTCLivePlayer.nextState(for: .failed, hasPlayed: true, hasVideoFrames: true),
+            .failed(.connectionLost)
+        )
+    }
+
+    func testDisconnectIsStalledSoItCanRecoverOnItsOwn() {
+        XCTAssertEqual(
+            WebRTCLivePlayer.nextState(for: .disconnected, hasPlayed: true, hasVideoFrames: true),
+            .stalled
+        )
+    }
+
+    /// Transitions we either already reported or caused ourselves must not republish anything -
+    /// `.closed` in particular is our own teardown.
+    func testNewConnectingAndClosedProduceNoTransition() {
+        for state: RTCPeerConnectionState in [.new, .connecting, .closed] {
+            XCTAssertNil(
+                WebRTCLivePlayer.nextState(for: state, hasPlayed: true, hasVideoFrames: true),
+                "\(state.rawValue) should not change the reported state"
+            )
+        }
     }
 
     // MARK: Lifecycle

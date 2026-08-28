@@ -238,20 +238,26 @@ final class FrigateClientTests: XCTestCase {
 
     // MARK: WebSockets (P4 live view)
 
-    func testWebSocketURLMapsHTTPSToWSSKeepingHostPortPathAndQuery() async {
-        let url = await makeClient().webSocketURL(for: .webrtcWebSocket(src: "front_door_hi"))
-        XCTAssertEqual(url?.absoluteString, "wss://nvr.local:8971/live/webrtc/api/ws?src=front_door_hi")
+    func testWebSocketRequestMapsHTTPSToWSSKeepingHostPortPathAndQuery() async throws {
+        let request = try await makeClient().webSocketRequest(for: .webrtcWebSocket(src: "front_door_hi"))
+        XCTAssertEqual(
+            request.url?.absoluteString,
+            "wss://nvr.local:8971/live/webrtc/api/ws?src=front_door_hi"
+        )
     }
 
-    func testWebSocketURLMapsHTTPToWS() async {
+    func testWebSocketRequestMapsHTTPToWS() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let client = FrigateClient(
             baseURL: URL(string: "http://192.168.1.50:5000")!,
             session: URLSession(configuration: config)
         )
-        let url = await client.webSocketURL(for: .webrtcWebSocket(src: "front"))
-        XCTAssertEqual(url?.absoluteString, "ws://192.168.1.50:5000/live/webrtc/api/ws?src=front")
+        let request = try await client.webSocketRequest(for: .webrtcWebSocket(src: "front"))
+        XCTAssertEqual(
+            request.url?.absoluteString,
+            "ws://192.168.1.50:5000/live/webrtc/api/ws?src=front"
+        )
     }
 
     /// nginx gates the signaling route with `auth_request`, so the handshake has to carry

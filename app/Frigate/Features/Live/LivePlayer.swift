@@ -15,9 +15,13 @@ protocol LivePlayer: AnyObject {
     /// stream rather than assuming 16:9. A property of the media, not of any rendering technology,
     /// so every tier can answer it.
     var videoSize: CGSize? { get }
+    /// Called whenever `videoSize` changes, including a mid-stream resolution switch. A push
+    /// channel rather than something to poll, for the same reason as `onStateChange`: players are
+    /// not `@Observable`, so nothing downstream would ever notice a change on its own.
     /// Called on every state change. Players are not `@Observable` (SwiftUI can't observe through
     /// an existential), so the owning model republishes state through this rather than watching it.
     var onStateChange: (@MainActor (LivePlayerState) -> Void)? { get set }
+    var onVideoSizeChange: (@MainActor (CGSize) -> Void)? { get set }
     /// Idempotent: calling twice must not open a second connection.
     func start()
     /// Full teardown. Safe to call twice, and safe to call before `start()`.

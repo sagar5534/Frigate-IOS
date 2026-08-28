@@ -8,6 +8,11 @@ struct CameraDetailView: View {
     @State private var snapshotModel: CameraDetailModel
     @State private var liveModel: LiveCameraModel
     @State private var isFullscreen = false
+    /// Whether this screen is actually on-screen. A detail view the user navigated away from stays
+    /// in the hierarchy and keeps receiving scene-phase changes, so without this a backgrounded and
+    /// then foregrounded app would start live video for a camera nobody is looking at - and with no
+    /// `onDisappear` left to fire, nothing would ever stop it.
+    @State private var isVisible = false
     @Environment(\.scenePhase) private var scenePhase
 
     init(client: FrigateClient, cameraName: String, config: FrigateConfig) {
@@ -17,31 +22,35 @@ struct CameraDetailView: View {
     }
 
     var body: some View {
-        Group {
-            if isFullscreen {
-                fullscreenPlayer
-            } else {
-                inlinePlayer
-            }
-        }
+        // Deliberately not an if/else over two branches: both would be mounted during the
+        // transition and both would call `makeUIView`, handing the *same* `RTCMTLVideoView` to two
+        // representables. A UIView has one superview, so the second would steal it from the first.
+        inlinePlayer
         .navigationTitle(cameraName.replacingOccurrences(of: "_", with: " "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
         .toolbar(isFullscreen ? .hidden : .visible, for: .tabBar)
         .statusBarHidden(isFullscreen)
         .task {
+            isVisible = true
             snapshotModel.startAutoRefresh()
             liveModel.start()
         }
         .onDisappear {
             // Navigating away must close the peer connection. Without this the socket, the ICE
             // agent and the decoder all keep running behind whatever screen comes next.
+            isVisible = false
             liveModel.stop()
             snapshotModel.stopAutoRefresh()
         }
         .onChange(of: liveModel.isPlaying) { _, isPlaying in
             // The snapshot underneath is the fallback, not the picture, once video is flowing -
             // and re-decoding a JPEG every 5s behind a live stream is pure waste.
+            //
+            // Guarded on visibility because `stop()` flips this false: tearing down for any reason,
+            // including going to the background, would otherwise *start* a 5s polling loop on a
+            // screen nobody can see.
+            guard isVisible, scenePhase == .active else { return }
             if isPlaying {
                 snapshotModel.stopAutoRefresh()
             } else {
@@ -51,37 +60,49 @@ struct CameraDetailView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                guard isVisible else { return }
                 liveModel.start()
-            case .background, .inactive:
+                if !liveModel.isPlaying {
+                    snapshotModel.startAutoRefresh()
+                }
+            case .background:
                 // A backgrounded app cannot render video, and iOS will suspend it holding an open
                 // peer connection and a decode session. Tear down and rebuild on return.
+                //
+                // `.inactive` is deliberately excluded. iOS sends it for the app switcher, a
+                // Control Centre pull, an incoming call banner - moments the user is still looking
+                // at the app. Tearing down for those costs a full re-handshake and a second of
+                // black every time someone glances away, and resets the reconnect budget with it.
                 liveModel.stop()
+                snapshotModel.stopAutoRefresh()
+            case .inactive:
+                break
             @unknown default:
                 break
             }
         }
     }
 
+    /// One view hierarchy for both presentations; only the framing changes.
+    ///
+    /// Fullscreen is shaped to the stream, not to the screen. These cameras are wide, and letting a
+    /// 16:9 feed fill a tall phone crops most of the frame away - the opposite of what someone asks
+    /// for when they tap to expand.
     private var inlinePlayer: some View {
         ScrollView {
             picture
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .aspectRatio(
+                    isFullscreen ? (liveModel.videoAspectRatio ?? 16.0 / 9.0) : 16.0 / 9.0,
+                    contentMode: .fit
+                )
+                .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 12))
                 .overlay(alignment: .bottomTrailing) { freshnessBadge }
-                .padding()
+                .padding(isFullscreen ? 0 : 16)
+                .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : nil)
         }
-    }
-
-    private var fullscreenPlayer: some View {
-        ZStack {
-            Color.black
-            // Shaped to the stream, not to the screen. These cameras are wide; letting a 16:9 feed
-            // fill a tall phone crops most of the frame away, which is the opposite of what someone
-            // asks for when they tap to expand.
-            picture
-                .aspectRatio(liveModel.videoAspectRatio ?? 16.0 / 9.0, contentMode: .fit)
-        }
-        .ignoresSafeArea()
+        .scrollDisabled(isFullscreen)
+        .background(isFullscreen ? Color.black : Color.clear)
+        .ignoresSafeArea(edges: isFullscreen ? .all : [])
     }
 
     private var picture: some View {

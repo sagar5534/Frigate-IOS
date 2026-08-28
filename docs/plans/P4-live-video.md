@@ -499,25 +499,43 @@ gate above is still unrun.
 
 ## C4 - Wire into camera detail (BUILT)
 
-`LiveCameraModel` resolves the ladder from `AppModel`'s config, asks `LivePlayerFactory` for a
-player, and owns start/stop. `LiveCameraView` stacks the live surface over the existing snapshot
-and crossfades on first frame (`RTCVideoViewDelegate.didChangeVideoSize` is the signal; the Metal
-view is transparent until then, which gives the loading state for free - same trick as the Recent
-Activity strip's `AVPlayerLayer`, see `LEARNINGS.md`). The snapshot poll stops once state reaches
-`.playing` and resumes if live fails. Tap to fullscreen; `.notAvailable` keeps the P2 snapshot
-experience unchanged rather than showing an error.
+`LiveCameraModel` resolves the ladder from the config, asks `LivePlayerFactory` for a player, and
+owns start/stop. `LiveCameraView` stacks the live surface over the existing snapshot and **leaves
+the snapshot there** - a Metal view with no frame yet is transparent, so the still shows through
+until video arrives. That means no crossfade to tune, no flash of black, and a failure degrades to
+a working picture rather than an error screen. The snapshot poll stops once state reaches
+`.playing` and resumes if live fails; `.notAvailable` keeps the P2 experience unchanged rather than
+showing an error at all.
+
+Tap toggles fullscreen within one view hierarchy - deliberately not an if/else over two branches,
+since both would be mounted mid-transition and both would claim the same `RTCMTLVideoView`.
+Fullscreen is letterboxed to the stream's own aspect ratio, because these cameras are wide and
+filling a tall phone crops most of the frame away.
+
+Scene-phase handling excludes `.inactive`: iOS sends it for the app switcher, a Control Centre pull
+and incoming-call banners, and tearing down a peer connection for those costs a full re-handshake
+every time someone glances away. Only `.background` tears down, and only a *visible* detail view
+restarts - a screen the user navigated away from still receives scene-phase changes.
 
 ## C5 - Reconnect, teardown, honest failure (BUILT)
 
-Exponential backoff on `connectionLost`. A startup deadline (the PWA uses 5s) that resolves to
-`.failed(.iceFailed)` rather than spinning, and a stall deadline (3s without frames) that shows
-`.stalled` before dropping to reconnect. Teardown on `.onDisappear`, `scenePhase` background, and
-tab switch; verify the peer connection is closed, the socket closed, and every task cancelled.
+Exponential backoff (1s doubling to 30s) with a 5-attempt cap, after which it hands over to the
+user. A **12s startup deadline** so a stuck connection fails fast instead of waiting out
+libwebrtc's own ICE timeout of tens of seconds, and an **8s stall deadline** giving a stalled
+stream a grace period to recover on its own before a reconnect costs a fresh handshake. A 5s frame
+watchdog in the player catches the nastiest case: RTP stopping while ICE consent keeps the
+transport `connected`, which otherwise leaves a frozen picture claiming to be live.
 
-Because no fallback tier exists yet, `iceFailed` copy must name the cause and the fix in plain
-language ("this camera's live stream can't be reached from this network - it needs port 8555 open
-to the app") with a Retry, plus the snapshot still visible underneath. Getting this wrong is how a
-correct implementation reads as a broken app.
+`.iceFailed` is deliberately **never** auto-retried - it is a structural fact about the network, so
+hammering it only costs battery. `.signalingFailed`, `.connectionLost` and `.noVideo` are all
+plausibly transient and get the bounded retry; the first signalling retry also refreshes the
+session, because the WebSocket handshake carries whatever cookie was in the jar and has no 401
+retry of its own.
+
+Failure copy has to name the cause, and naming the *wrong* one is worse than saying nothing:
+`.iceFailed` says port 8555 is unreachable, while `.noVideo` says the connection worked and the
+camera sent nothing. During automatic backoff the UI shows "Reconnecting" rather than the error
+card, so "Try Again" only appears when it is actually the user's move.
 
 ---
 

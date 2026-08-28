@@ -108,6 +108,42 @@ per-object events; see `../DECISIONS.md` ADR-009 for why).
 - `Networking/Endpoint.swift`'s `basePath` field (ADR-010) lets `reviewThumbnail`/`reviewClipHLS`
   address routes outside `/api/` through the same client/auth/retry path as everything else.
 
+## Feature: Live video (P4)
+
+WebRTC through go2rtc, on the camera detail screen only. Frigate exposes **no live HLS** at all -
+see `../DECISIONS.md` ADR-012 for the finding and the WebRTC -> MSE -> MJPEG tier ladder it produced.
+
+- `Models/LiveTransport.swift` - `LiveTransport` enumerates all three tiers; `LiveStreamSource`
+  resolves a camera to an ordered ladder. Only `.webrtc` has an implementation today. Which stream
+  to open is decided by *label* (a main-stream label beats a sub-stream one) rather than by
+  position, because JSON key order does not survive `JSONDecoder` - see `../LEARNINGS.md`.
+- `Features/Live/LivePlayer.swift` - the seam. A protocol plus `LivePlayerState`/`LivePlayerError`
+  and `LivePlayerFactory`, which builds the best rung implemented in this build and returns `nil`
+  when none are. P4.1 (MSE) and P4.2 (MJPEG) each land as one conformer plus one factory case.
+  `.playing` means **pixels on screen**, not merely "the transport connected".
+- `Features/Live/WebRTCSignaling.swift` - go2rtc's `{"type","value"}` envelope and the handshake
+  ordering rule that matters: candidates arriving before the answer are held and released after it,
+  since `RTCPeerConnection.add(_:)` rejects them otherwise.
+- `Networking/LiveSocket.swift` - an actor over `URLSessionWebSocketTask`, built from
+  `FrigateClient`'s own session so it inherits the cookie jar and the insecure-trust delegate.
+  Conforms to `SignalingChannel`, which is what makes the handshake testable without a server.
+- `Features/Live/WebRTCLivePlayer.swift` - peer connection lifecycle, video-only `recvonly`
+  negotiation, and the connection-state mapping (extracted as a pure `nextState(for:…)` so the
+  decisions behind the user-facing errors are unit-tested).
+- `Features/Live/PeerConnectionObserver.swift` / `VideoFrameObserver.swift` - both `nonisolated`,
+  because libwebrtc calls them from its own threads. The frame observer is an `RTCVideoRenderer` on
+  the track rather than a delegate of the video view; `../LEARNINGS.md` explains why that
+  distinction cost an evening.
+- `Features/Live/LiveCameraModel.swift` - lifecycle, reconnect policy, deadlines and teardown. The
+  policy lives here rather than in the player so every future tier inherits it.
+- `Features/Cameras/CameraDetailView.swift` - the only place live runs. The camera list stays on the
+  P2 snapshot loop ("never live-stream a grid"), and the snapshot stays *underneath* the video
+  rather than being swapped out, so a failure degrades to a working picture.
+
+Diagnostics go to `com.sagarp.Frigate` / `live` (`LiveLog`), including an `inbound-rtp` probe -
+`bytesReceived` and `framesDecoded` are what separate "the media path is blocked" from "the media
+path works and nothing is consuming it", which look identical on screen.
+
 ## App shell
 
 `App/MainTabView.swift` is the tab bar (Cameras / Events / Settings) shown once `AppModel` reaches

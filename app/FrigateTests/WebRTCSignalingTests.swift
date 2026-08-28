@@ -134,11 +134,4 @@ final class WebRTCSignalingTests: XCTestCase {
         let events = await collect(WebRTCSignaling(channel: channel))
         XCTAssertEqual(events, [])
     }
-
-    func testCloseIsForwardedToTheChannel() async {
-        let channel = FakeSignalingChannel()
-        await WebRTCSignaling(channel: channel).close()
-        let isClosed = await channel.isClosed
-        XCTAssertTrue(isClosed)
-    }
 }

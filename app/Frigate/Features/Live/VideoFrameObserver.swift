@@ -19,7 +19,12 @@ import WebRTC
 nonisolated final class VideoFrameObserver: NSObject, RTCVideoRenderer {
     private let onFirstFrame: @Sendable () -> Void
     private let onSize: @Sendable (CGSize) -> Void
-    private let reported = Mutex(false)
+    private let state = Mutex(State())
+
+    private struct State {
+        var reportedFirstFrame = false
+        var lastFrameAt: ContinuousClock.Instant?
+    }
 
     init(onFirstFrame: @escaping @Sendable () -> Void, onSize: @escaping @Sendable (CGSize) -> Void) {
         self.onFirstFrame = onFirstFrame
@@ -27,9 +32,19 @@ nonisolated final class VideoFrameObserver: NSObject, RTCVideoRenderer {
         super.init()
     }
 
+    /// When the most recent frame arrived, for a liveness check.
+    ///
+    /// Read on demand rather than pushed: frames arrive at the stream's frame rate, and hopping to
+    /// the main actor tens of times a second to say "still fine" would cost far more than the
+    /// watchdog it feeds. A lock-guarded timestamp the watchdog samples every few seconds is the
+    /// whole mechanism.
+    var lastFrameAt: ContinuousClock.Instant? {
+        state.withLock(\.lastFrameAt)
+    }
+
     /// Lets one observer be reused across reconnects.
     func reset() {
-        reported.withLock { $0 = false }
+        state.withLock { $0 = State() }
     }
 
     /// Called when the stream's dimensions are known, and again if the camera switches resolution.
@@ -40,10 +55,12 @@ nonisolated final class VideoFrameObserver: NSObject, RTCVideoRenderer {
 
     func renderFrame(_ frame: RTCVideoFrame?) {
         guard frame != nil else { return }
-        // Called for every frame at the stream's frame rate; only the first one is news.
-        let isFirst = reported.withLock { reported -> Bool in
-            guard !reported else { return false }
-            reported = true
+        // Called for every frame at the stream's frame rate. Every one refreshes the liveness
+        // timestamp; only the first is worth waking anyone up for.
+        let isFirst = state.withLock { state -> Bool in
+            state.lastFrameAt = .now
+            guard !state.reportedFirstFrame else { return false }
+            state.reportedFirstFrame = true
             return true
         }
         if isFirst {

@@ -23,8 +23,9 @@ final class LiveCameraModel {
     private var deadlineTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     /// Whether video has ever arrived on this camera in this session. Decides what a later failure
-    /// is *about*, which is the difference between useful advice and misleading advice.
-    private var hasEverPlayed = false
+    /// is *about*, which is the difference between useful advice and misleading advice - and what a
+    /// pause should be *called*, since nothing can be "reconnecting" that never connected.
+    private(set) var hasEverPlayed = false
 
     /// Timings, injectable so tests don't sleep through them.
     struct Policy {
@@ -64,10 +65,12 @@ final class LiveCameraModel {
 
     /// The stream's aspect ratio once known, so a fullscreen container can be shaped to the video
     /// instead of cropping it to whatever shape the screen happens to be.
-    var videoAspectRatio: CGFloat? {
-        guard let size = player?.videoSize, size.height > 0 else { return nil }
-        return size.width / size.height
-    }
+    ///
+    /// Mirrored into observable state rather than read through to the player on demand: players are
+    /// not `@Observable` (SwiftUI cannot observe through an existential), so a computed passthrough
+    /// would only ever refresh when some *other* tracked property happened to change - and a camera
+    /// that switches resolution mid-stream changes nothing else.
+    private(set) var videoAspectRatio: CGFloat?
 
     /// A failure the user has to act on, as opposed to one we're already retrying.
     var isAwaitingManualRetry: Bool {
@@ -91,6 +94,9 @@ final class LiveCameraModel {
         player.onStateChange = { [weak self] newState in
             self?.handle(newState)
         }
+        player.onVideoSizeChange = { [weak self] size in
+            self?.videoAspectRatio = size.height > 0 ? size.width / size.height : nil
+        }
         self.player = player
         state = .connecting
         player.start()
@@ -102,7 +108,9 @@ final class LiveCameraModel {
         cancelTimers()
         reconnectAttempt = 0
         hasEverPlayed = false
+        videoAspectRatio = nil
         player?.onStateChange = nil
+        player?.onVideoSizeChange = nil
         player?.stop()
         player = nil
         state = .idle
@@ -158,17 +166,33 @@ final class LiveCameraModel {
 
         guard reconnectAttempt < policy.maximumAttempts else { return }
         let delay = backoff(for: reconnectAttempt)
+        let isFirstAttempt = reconnectAttempt == 0
         reconnectAttempt += 1
 
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
+
+            // The WebSocket handshake carries whatever cookie was in the jar and has no 401 retry of
+            // its own - unlike every other request, which re-logs-in transparently. An expired
+            // session therefore looks like "the server didn't answer". Refresh once before the first
+            // retry so a stale cookie self-heals instead of burning the whole budget on a wrong
+            // diagnosis.
+            if isFirstAttempt, error == .signalingFailed {
+                await self.client.refreshSession()
+            }
+            guard !Task.isCancelled else { return }
             self.reconnectTask = nil
+            // `stop()` is also the user-facing teardown, so it clears both of these. An automatic
+            // reconnect is a continuation of the same session, not a fresh one: the attempt count
+            // has to survive or the chain never terminates, and `hasEverPlayed` has to survive or a
+            // stream that played, dropped and reconnected would report the next silence as
+            // "the camera sent no video" instead of a lost connection.
             let attempt = self.reconnectAttempt
+            let played = self.hasEverPlayed
             self.stop()
-            // `stop()` resets the counter because it is also the user-facing teardown; restore it
-            // so an automatic retry chain still terminates.
             self.reconnectAttempt = attempt
+            self.hasEverPlayed = played
             self.start()
         }
     }

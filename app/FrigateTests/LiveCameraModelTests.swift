@@ -14,6 +14,11 @@ final class LiveCameraModelTests: XCTestCase {
         )
     }
 
+    override func tearDown() {
+        MockURLProtocol.requestHandler = nil
+        super.tearDown()
+    }
+
     private func makeClient() -> FrigateClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
@@ -165,43 +170,105 @@ final class LiveCameraModelTests: XCTestCase {
         model.stop()
     }
 
-    /// Retrying forever on a camera nobody is watching is just battery, so the chain has to stop
-    /// and hand over to the user.
-    func testReconnectGivesUpAfterTheAttemptLimit() async throws {
-        let player = FakeLivePlayer()
-        let model = makeModel(config: try makeConfig(), player: player)
-        model.start()
+    /// Deadlines pushed far out of reach, so the *only* thing that can end a reconnect chain in
+    /// these tests is the attempt budget. Without this the 20ms startup deadline can fire and
+    /// produce `.failed(.iceFailed)`, which is also not auto-retried - so the test would go green
+    /// for the wrong reason.
+    private var budgetOnlyPolicy: LiveCameraModel.Policy {
+        var policy = fastPolicy
+        policy.startupDeadline = .seconds(60)
+        policy.stallDeadline = .seconds(60)
+        return policy
+    }
 
-        for _ in 0..<6 {
+    /// Drives failures until the model stops reconnecting, and reports how many starts happened.
+    private func exhaustReconnectBudget(
+        _ model: LiveCameraModel,
+        _ player: FakeLivePlayer
+    ) async {
+        for _ in 0..<(fastPolicy.maximumAttempts + 3) {
             player.simulate(.failed(.connectionLost))
-            try await Task.sleep(for: .milliseconds(15))
+            let startsBefore = player.startCount
+            // Either it reconnects (start count rises) or the budget is spent and it stops.
+            for _ in 0..<400 where player.startCount == startsBefore && !model.isAwaitingManualRetry {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            if model.isAwaitingManualRetry { return }
         }
+    }
 
-        XCTAssertLessThanOrEqual(
-            player.startCount, fastPolicy.maximumAttempts + 1,
-            "automatic attempts should stop at the limit"
+    /// Retrying forever on a camera nobody is watching is just battery, so the chain has to stop
+    /// and hand over to the user - after exactly the budgeted number of attempts, not fewer.
+    func testReconnectGivesUpAfterExactlyTheAttemptLimit() async throws {
+        let player = FakeLivePlayer()
+        let model = LiveCameraModel(
+            client: makeClient(),
+            cameraName: "front_door",
+            config: try makeConfig(),
+            factory: LivePlayerFactory { _, _ in player },
+            policy: budgetOnlyPolicy
         )
-        await waitUntil("the model to settle awaiting a manual retry") { model.isAwaitingManualRetry }
+        model.start()
+        await exhaustReconnectBudget(model, player)
+
+        XCTAssertEqual(
+            player.startCount, budgetOnlyPolicy.maximumAttempts + 1,
+            "one initial start plus exactly the budgeted automatic attempts"
+        )
+        XCTAssertTrue(model.isAwaitingManualRetry)
         model.stop()
     }
 
     /// A person tapping Retry is new information, so the budget resets.
     func testManualRetryResetsTheAttemptBudget() async throws {
         let player = FakeLivePlayer()
-        let model = makeModel(config: try makeConfig(), player: player)
+        let model = LiveCameraModel(
+            client: makeClient(),
+            cameraName: "front_door",
+            config: try makeConfig(),
+            factory: LivePlayerFactory { _, _ in player },
+            policy: budgetOnlyPolicy
+        )
         model.start()
-
-        for _ in 0..<6 {
-            player.simulate(.failed(.connectionLost))
-            try await Task.sleep(for: .milliseconds(15))
-        }
-        await waitUntil("the chain to give up") { model.isAwaitingManualRetry }
+        await exhaustReconnectBudget(model, player)
+        let startsWhenExhausted = player.startCount
 
         model.retry()
-        XCTAssertEqual(model.state, .connecting)
+        XCTAssertEqual(player.startCount, startsWhenExhausted + 1, "retry starts the player again")
+
+        // And the budget is genuinely reset, not merely nudged: a full second chain runs.
+        await exhaustReconnectBudget(model, player)
+        XCTAssertEqual(
+            player.startCount,
+            startsWhenExhausted + 1 + budgetOnlyPolicy.maximumAttempts,
+            "a manual retry should restore the whole automatic budget"
+        )
+        model.stop()
+    }
+
+    /// A stream that played, dropped, reconnected and then went silent has demonstrably working
+    /// networking, so the failure must not be reported as "the camera sent no video". This is the
+    /// case where the reconnect path has to carry `hasEverPlayed` across its own teardown.
+    func testHistoryOfPlayingSurvivesAnAutomaticReconnect() async throws {
+        let player = FakeLivePlayer()
+        var policy = fastPolicy
+        policy.startupDeadline = .seconds(60)
+        let model = LiveCameraModel(
+            client: makeClient(),
+            cameraName: "front_door",
+            config: try makeConfig(),
+            factory: LivePlayerFactory { _, _ in player },
+            policy: policy
+        )
+        model.start()
+        player.simulate(.playing)
         player.simulate(.failed(.connectionLost))
-        let startsAfterRetry = player.startCount
-        await waitUntil("reconnects to resume") { player.startCount > startsAfterRetry }
+        await waitUntil("the reconnect to fire") { player.startCount >= 2 }
+
+        player.simulate(.stalled)
+        await waitUntil("the stall to resolve as a lost connection") {
+            model.state == .failed(.connectionLost)
+        }
         model.stop()
     }
 
@@ -292,6 +359,34 @@ final class LiveCameraModelTests: XCTestCase {
         XCTAssertNil(model.videoAspectRatio, "unknown until the stream reports its size")
         player.videoSize = CGSize(width: 1600, height: 1200)
         XCTAssertEqual(model.videoAspectRatio ?? 0, 4.0 / 3.0, accuracy: 0.001)
+        model.stop()
+    }
+
+    /// A camera that switches resolution mid-stream changes nothing else observable, so the size
+    /// has to arrive as its own push rather than being noticed in passing during a state change.
+    func testAMidStreamResolutionChangeUpdatesTheAspectRatio() async throws {
+        let player = FakeLivePlayer()
+        let model = makeModel(config: try makeConfig(), player: player)
+        model.start()
+        player.simulate(.playing)
+        player.videoSize = CGSize(width: 1920, height: 1080)
+        XCTAssertEqual(model.videoAspectRatio ?? 0, 16.0 / 9.0, accuracy: 0.001)
+
+        player.videoSize = CGSize(width: 640, height: 480)
+        XCTAssertEqual(model.videoAspectRatio ?? 0, 4.0 / 3.0, accuracy: 0.001)
+        model.stop()
+    }
+
+    /// Drives the wording of the status badge: nothing can be "reconnecting" that never connected.
+    func testHasEverPlayedIsFalseUntilVideoActuallyArrives() async throws {
+        let player = FakeLivePlayer()
+        let model = makeModel(config: try makeConfig(), player: player)
+        model.start()
+        player.simulate(.stalled)
+        XCTAssertFalse(model.hasEverPlayed, "a first connection that pauses has not played yet")
+
+        player.simulate(.playing)
+        XCTAssertTrue(model.hasEverPlayed)
         model.stop()
     }
 

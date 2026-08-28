@@ -121,8 +121,7 @@ three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
   release slice, not the ~30MB the plan assumed); `PeerConnectionObserver` bridges libwebrtc's
   delegate onto an ordered `AsyncStream`; `WebRTCLivePlayer` does recvonly-video negotiation and
   maps connection state onto `LivePlayerState`; `LiveVideoView` hosts `RTCMTLVideoView`.
-  166 tests. **Code only: C3's real milestone - a moving picture from a real camera - is unmet,
-  because the C2 gate has still not been run**
+  Verified end to end: a moving picture from a real camera, H.264, ~2s to first frame
 - [x] C4 - Wired into camera detail - `LiveCameraModel`/`LiveCameraView`; the camera list stays on
   the P2 snapshot loop and live starts only when a camera is opened. The snapshot sits *under* the
   video permanently (a Metal view with no frame is transparent), so there is no crossfade to tune

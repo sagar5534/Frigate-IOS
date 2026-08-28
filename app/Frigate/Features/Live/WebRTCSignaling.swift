@@ -113,8 +113,4 @@ nonisolated struct WebRTCSignaling: Sendable {
 
         return stream
     }
-
-    func close() async {
-        await channel.close()
-    }
 }

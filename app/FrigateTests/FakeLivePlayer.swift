@@ -7,7 +7,14 @@ import SwiftUI
 final class FakeLivePlayer: LivePlayer {
     let transport: LiveTransport
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
-    var videoSize: CGSize?
+    var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
+
+    var videoSize: CGSize? {
+        didSet {
+            guard let videoSize, videoSize != oldValue else { return }
+            onVideoSizeChange?(videoSize)
+        }
+    }
 
     private(set) var state: LivePlayerState = .idle {
         didSet {

@@ -19,7 +19,12 @@ struct LiveCameraView: View {
                 player.view
             }
 
-            LiveStatusOverlay(state: live.state, retry: live.retry)
+            LiveStatusOverlay(
+                state: live.state,
+                isAwaitingManualRetry: live.isAwaitingManualRetry,
+                hasEverPlayed: live.hasEverPlayed,
+                retry: live.retry
+            )
         }
     }
 }
@@ -29,6 +34,12 @@ struct LiveCameraView: View {
 /// a perfectly good picture would be noise.
 struct LiveStatusOverlay: View {
     let state: LivePlayerState
+    /// Whether the failure is the user's to act on, or one the model is already retrying.
+    let isAwaitingManualRetry: Bool
+    /// Whether video has played at all yet. Only the wording depends on it, but the wording matters:
+    /// a first connection that pauses is still connecting, and calling that "Reconnecting" tells
+    /// the user something dropped when nothing ever started.
+    let hasEverPlayed: Bool
     let retry: () -> Void
 
     var body: some View {
@@ -38,9 +49,25 @@ struct LiveStatusOverlay: View {
         case .connecting:
             badge { ProgressView().controlSize(.small) ; Text("Connecting") }
         case .stalled:
-            badge { ProgressView().controlSize(.small) ; Text("Reconnecting") }
+            // `.stalled` covers both "connected, waiting for the first frame" and "was playing and
+            // went quiet". They look the same to the state machine and read very differently to a
+            // person.
+            badge {
+                ProgressView().controlSize(.small)
+                Text(hasEverPlayed ? "Reconnecting" : "Connecting")
+            }
         case .failed(let error):
-            failure(error)
+            // A failure with a retry already scheduled is a transient blip, not something to
+            // interrupt anyone about. Showing the full explanation card during backoff would flash
+            // "Try Again" at the user five times over half a minute before it was ever true.
+            if isAwaitingManualRetry {
+                failure(error)
+            } else {
+                badge {
+                    ProgressView().controlSize(.small)
+                    Text(hasEverPlayed ? "Reconnecting" : "Connecting")
+                }
+            }
         }
     }
 

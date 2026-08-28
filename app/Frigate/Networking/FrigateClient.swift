@@ -212,10 +212,16 @@ extension FrigateClient {
 // MARK: WebSockets (P4 live view)
 
 extension FrigateClient {
-    /// The endpoint's URL with the scheme mapped for WebSockets (`https` -> `wss`, `http` -> `ws`).
-    func webSocketURL(for endpoint: Endpoint) -> URL? {
-        guard let url = try? endpointURL(endpoint) else { return nil }
-        return Self.webSocketScheme(url)
+    /// Re-runs `/api/login` so a stale session cookie is replaced.
+    ///
+    /// Every ordinary request self-heals on a `401` through the retry seam, but a WebSocket
+    /// handshake has no such path: it carries whatever cookie the jar held and simply fails. The
+    /// live-view retry calls this once so an expired session recovers instead of being reported as
+    /// an unresponsive server. Silent on failure - the caller is already in a retry, and the error
+    /// it eventually reports is more informative than one from here.
+    func refreshSession() async {
+        guard let credentials else { return }
+        try? await credentials.reauthenticate(self)
     }
 
     /// The exact handshake request `liveSocket(for:)` will use. Public for tests and for logging a
