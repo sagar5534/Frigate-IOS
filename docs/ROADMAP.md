@@ -109,8 +109,13 @@ three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
   `FrigateClient.webSocketURL`/`webSocketRequest`/`liveSocket`. 145 tests green (was 126).
   Found that `JSONDecoder`'s `allKeys` is hash order, so stream resolution can't use position -
   see `LEARNINGS.md` and the plan's C1 ordering finding
-- [ ] C2 - go2rtc signaling (`SignalingChannel` seam, offer/answer/candidate codec, handshake
-  sequencing) - unit-tested against a fake channel, socket proven against the real server
+- [x] C2 - go2rtc signaling - `SignalingMessage` codec + `WebRTCSignaling` (buffers candidates that
+  arrive before the answer, since `RTCPeerConnection.add(_:)` rejects those), tested against
+  `FakeSignalingChannel`. 157 tests (2 skipped).
+  **Gate still open:** `LiveServerIntegrationTests` proves the socket opens through nginx
+  `auth_request` with the session cookie and is refused without it, but it is opt-in (needs
+  `FRIGATE_TEST_URL`/`_USER`/`_PASSWORD`) and has not been run against the real server yet.
+  Run it before starting C3 - it is what justifies adding the libwebrtc binary
 - [ ] C3 - WebRTC dependency (`stasel/WebRTC`, pinned) + `WebRTCLivePlayer` + `LiveVideoView`
 - [ ] C4 - Wire into camera detail: snapshot until first frame, fullscreen, connecting/stalled/
   failed states, snapshot poll stops once live is playing

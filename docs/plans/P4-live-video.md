@@ -406,21 +406,46 @@ authenticated socket to the right URL.
 
 ---
 
-## C2 - go2rtc signaling (SUMMARY)
+## C2 - go2rtc signaling (BUILT)
 
-`WebRTCSignaling` owns the protocol, not the media: a `Codable` message enum
-(`webrtc/offer`, `webrtc/answer`, `webrtc/candidate`), the send-offer-on-open sequencing, and an
-`AsyncStream` of decoded inbound events. It takes a `SignalingChannel`, so unit tests drive it with
-a `FakeSignalingChannel` replaying a scripted message sequence - no server, no libwebrtc.
+`SignalingMessage` is the `{"type": …, "value": …}` envelope codec for `webrtc/offer`,
+`webrtc/answer` and `webrtc/candidate`. Unknown types decode to `nil` and are dropped rather than
+failing the connection - the same socket API also carries MSE's `mse` handshake (P4.1), so an
+unrecognised type is normal traffic, and Frigate's PWA ignores them identically.
 
-Cover the shapes that actually bite: an answer arriving before any candidate, candidates arriving
-before the answer, a malformed/unknown `type` (ignore, do not fail the connection), and the socket
-closing mid-handshake. Remember remote candidates carry no `sdpMid` - supply `"0"`, as the PWA does.
+`WebRTCSignaling` owns the protocol and nothing about the media - no reference to
+`RTCPeerConnection` at all, which is what lets the whole handshake be tested with no server and no
+libwebrtc binary. The one piece of real logic: **candidates that arrive before the answer are held
+back and released immediately after it.** go2rtc trickles candidates as soon as it has them, so
+they routinely beat the answer down the wire, and `RTCPeerConnection.add(_:)` rejects a candidate
+before `setRemoteDescription`. Keeping that race here rather than in the player is what makes it
+reproducible: in C3 it would need a live server and a stopwatch.
 
-**Real-server milestone (do this before C3):** open the socket against the live server with the
-session cookie and confirm the 101 upgrade holds; then confirm it is rejected without the cookie.
-That settles the nginx `auth_request`-over-WebSocket question while it is still cheap to be wrong,
-and it is the one C2 result that no unit test can give us.
+Tested against `FakeSignalingChannel`, which buffers scripted frames so each test drains a finished
+stream - no timing, no expectations, no flake: encoding shapes and round-trip, answer/candidate
+decoding, unknown-type and malformed frames dropped without ending the stream, an inbound offer
+ignored, early candidates released in arrival order, later ones passing straight through, and the
+server hanging up mid-handshake terminating cleanly.
+
+Still to do in C3: remote candidates carry no `sdpMid`, so supply `"0"` when applying them, as the
+PWA does.
+
+**Real-server gate (before C3, and it is what justifies the binary dependency):**
+`LiveServerIntegrationTests` opens the signaling socket against a real server using the stream name
+C1's resolution picked from the live `/api/config`, and pings it - a pong only round-trips once the
+HTTP upgrade succeeded, which distinguishes "nginx let us through" from "nginx returned 401"
+without needing an SDP offer we cannot produce yet. Its sibling asserts the socket is *refused*
+without the cookie. Both skip unless the environment names a server, so the suite stays hermetic:
+
+```bash
+FRIGATE_TEST_URL=https://frigate.sagarp.ca FRIGATE_TEST_USER=… FRIGATE_TEST_PASSWORD=… \
+  xcodebuild -project "app/Frigate.xcodeproj" -scheme Frigate \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -only-testing:FrigateTests/LiveServerIntegrationTests test
+```
+
+It also prints the resolved transport for every enabled camera, which is the first real check of
+C1's resolution against a live config rather than a fixture.
 
 ## C3 - Dependency + `WebRTCLivePlayer` + `LiveVideoView` (SUMMARY)
 
