@@ -50,9 +50,9 @@ final class CameraDetailModelTests: XCTestCase {
 
     @MainActor
     func testRefreshKeepsLastGoodSnapshotOnSubsequentFailure() async {
-        var shouldFail = false
+        let shouldFail = LockedBox(false)
         MockURLProtocol.requestHandler = { request in
-            shouldFail
+            shouldFail.current
                 ? (self.httpResponse(request.url!, 500), Data())
                 : (self.httpResponse(request.url!, 200), self.jpegBytes)
         }
@@ -61,7 +61,7 @@ final class CameraDetailModelTests: XCTestCase {
         await model.refresh()
         XCTAssertEqual(model.state.snapshot?.data, jpegBytes)
 
-        shouldFail = true
+        shouldFail.current = true
         await model.refresh()
         XCTAssertEqual(
             model.state.snapshot?.data,

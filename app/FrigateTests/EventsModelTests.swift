@@ -60,18 +60,18 @@ final class EventsModelTests: XCTestCase {
 
     @MainActor
     func testLoadSendsBothBeforeAndAfterToAvoidTheServersDefaultWindow() async {
-        var capturedQuery: [String: String] = [:]
+        let capturedQuery = LockedBox<[String: String]>([:])
         MockURLProtocol.requestHandler = { request in
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-            capturedQuery = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+            capturedQuery.current = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
             return (self.httpResponse(request.url!, 200), Data("[]".utf8))
         }
 
         let model = EventsModel(client: makeClient())
         await model.load()
 
-        XCTAssertNotNil(capturedQuery["before"])
-        XCTAssertNotNil(capturedQuery["after"])
+        XCTAssertNotNil(capturedQuery.current["before"])
+        XCTAssertNotNil(capturedQuery.current["after"])
     }
 
     @MainActor
@@ -88,10 +88,10 @@ final class EventsModelTests: XCTestCase {
 
     @MainActor
     func testLoadAppliesCurrentFiltersToTheQuery() async {
-        var capturedQuery: [String: String] = [:]
+        let capturedQuery = LockedBox<[String: String]>([:])
         MockURLProtocol.requestHandler = { request in
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-            capturedQuery = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+            capturedQuery.current = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
             return (self.httpResponse(request.url!, 200), Data("[]".utf8))
         }
 
@@ -101,9 +101,9 @@ final class EventsModelTests: XCTestCase {
         model.filters.severity = .alert
         await model.load()
 
-        XCTAssertEqual(capturedQuery["cameras"], "front_door")
-        XCTAssertEqual(capturedQuery["labels"], "person")
-        XCTAssertEqual(capturedQuery["severity"], "alert")
+        XCTAssertEqual(capturedQuery.current["cameras"], "front_door")
+        XCTAssertEqual(capturedQuery.current["labels"], "person")
+        XCTAssertEqual(capturedQuery.current["severity"], "alert")
     }
 
     @MainActor
@@ -189,13 +189,13 @@ final class EventsModelTests: XCTestCase {
     @MainActor
     func testLoadMoreSendsBothBeforeAndAfterAnchoredToTheOldestLoadedSegment() async {
         let firstPage = fullPageJSON(idPrefix: "p", startingAt: 300) // oldest start_time is 300
-        var capturedQuery: [String: String] = [:]
+        let capturedQuery = LockedBox<[String: String]>([:])
         let sequence = ResponseSequence([(200, firstPage), (200, Data("[]".utf8))])
         MockURLProtocol.requestHandler = { request in
             let (status, body) = sequence.next()
             if body == Data("[]".utf8) {
                 let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-                capturedQuery = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+                capturedQuery.current = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
             }
             return (self.httpResponse(request.url!, status), body)
         }
@@ -204,8 +204,8 @@ final class EventsModelTests: XCTestCase {
         await model.load()
         await model.loadMore()
 
-        XCTAssertEqual(capturedQuery["before"], "300.0")
-        XCTAssertNotNil(capturedQuery["after"])
+        XCTAssertEqual(capturedQuery.current["before"], "300.0")
+        XCTAssertNotNil(capturedQuery.current["after"])
     }
 
     @MainActor
@@ -277,16 +277,16 @@ final class EventsModelTests: XCTestCase {
 
     @MainActor
     func testLoadMoreIsNoOpBeforeAnyDataHasLoaded() async {
-        var requestCount = 0
+        let requestCount = Counter()
         MockURLProtocol.requestHandler = { request in
-            requestCount += 1
+            _ = requestCount.increment()
             return (self.httpResponse(request.url!, 200), Data("[]".utf8))
         }
 
         let model = EventsModel(client: makeClient())
         await model.loadMore()
 
-        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(requestCount.current, 0)
         XCTAssertEqual(model.state, .loading)
     }
 
@@ -294,10 +294,10 @@ final class EventsModelTests: XCTestCase {
     func testLoadMoreIsNoOpOnceHasMorePagesIsFalse() async {
         let firstPage = fullPageJSON(idPrefix: "p", startingAt: 300)
         let shortOlderPage = Data("[\(segmentJSON(id: "older", startTime: 100))]".utf8)
-        var requestCount = 0
+        let requestCount = Counter()
         let sequence = ResponseSequence([(200, firstPage), (200, shortOlderPage)])
         MockURLProtocol.requestHandler = { request in
-            requestCount += 1
+            _ = requestCount.increment()
             let (status, body) = sequence.next()
             return (self.httpResponse(request.url!, status), body)
         }
@@ -306,11 +306,11 @@ final class EventsModelTests: XCTestCase {
         await model.load()
         await model.loadMore()
         XCTAssertFalse(model.hasMorePages)
-        let countAfterExhausted = requestCount
+        let countAfterExhausted = requestCount.current
 
         await model.loadMore()
 
-        XCTAssertEqual(requestCount, countAfterExhausted, "no further request once hasMorePages is false")
+        XCTAssertEqual(requestCount.current, countAfterExhausted, "no further request once hasMorePages is false")
     }
 
     @MainActor

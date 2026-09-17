@@ -91,4 +91,30 @@ final class FrigateConfigTests: XCTestCase {
             ["alpha", "mike", "zebra"]
         )
     }
+
+    // MARK: detect (P4.2 - the MJPEG tier's clamp source)
+
+    func testDetectDecodesResolvedDimensionsAndFPS() throws {
+        let config = try decode(
+            camerasJSON: #"{"front_door": {"detect": {"width": 640, "height": 360, "fps": 10}}}"#
+        )
+        XCTAssertEqual(config.cameras["front_door"]?.detect,
+                       FrigateConfig.DetectInfo(width: 640, height: 360, fps: 10))
+    }
+
+    /// The server's own `DetectConfig` leaves width/height `None` until runtime resolution, and
+    /// the config API can hand that `null` straight back - it must not fail the whole decode.
+    func testDetectWithNullDimensionsStillDecodes() throws {
+        let config = try decode(
+            camerasJSON: #"{"front_door": {"detect": {"width": null, "height": null, "fps": 5}}}"#
+        )
+        XCTAssertEqual(config.cameras["front_door"]?.detect,
+                       FrigateConfig.DetectInfo(width: nil, height: nil, fps: 5))
+    }
+
+    func testMissingDetectFallsBackToServerDefaults() throws {
+        let config = try decode(camerasJSON: #"{"front_door": {}}"#)
+        XCTAssertEqual(config.cameras["front_door"]?.detect, FrigateConfig.DetectInfo())
+        XCTAssertEqual(config.cameras["front_door"]?.detect.fps, 5)
+    }
 }

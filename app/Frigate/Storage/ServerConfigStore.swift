@@ -3,7 +3,7 @@ import Foundation
 /// Persists the `ServerConfig` as JSON in the App-Group `UserDefaults` suite (shareable with the
 /// future Notification Service Extension). Non-secret only - the password stays in the Keychain.
 struct ServerConfigStore {
-    static let appGroupSuite = "group.com.sagarp.Frigate"
+    nonisolated static let appGroupSuite = "group.com.sagarp.Frigate"
     private static let key = "serverConfig"
 
     private let defaults: UserDefaults

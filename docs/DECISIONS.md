@@ -2,6 +2,46 @@
 
 Short architecture decision records: the choice, why, and consequences. Newest first.
 
+## ADR-013 - Live tier escalation: structural failures fall down the ladder; transient ones retry in place
+
+**Context:** With all three tiers built (P4-P4.2), a failed tier finally has somewhere to go. The
+PWA's answer is coarse - any player error swaps in the next source type. Ours distinguishes what
+the failure *means*, because the failures carry meaning by design (ADR-012's C5 work):
+
+**Decision (`LiveCameraModel`):**
+- **`.iceFailed` / `.decodeFailed` escalate immediately.** Both are structural facts about the
+  tier - port 8555 unreachable from this network; bytes this device cannot play - and retrying
+  reproduces them exactly. This is the payoff case: a network that blocks WebRTC now lands on MSE
+  (same authenticated HTTPS origin) within seconds instead of showing a router-configuration card.
+- **`.noVideo` escalates immediately.** The tier connected and showed nothing; the MJPEG floor
+  reads a genuinely *different source* (the detect pipeline, not the restream), so it can succeed
+  where the restream is silent.
+- **`.signalingFailed` gets one same-rung retry first**, because that retry path refreshes a
+  possibly-stale session cookie - the WebSocket handshake has no 401-retry of its own, and an
+  expired cookie is the most likely cause. Second failure escalates.
+- **`.connectionLost` spends the whole bounded retry budget on its own tier** before escalating:
+  the tier demonstrably worked, and quality should not be traded away over one blip.
+- The bottom rung keeps P4's behavior (bounded retries for transient failures, wait-for-user on
+  structural ones). Escalation only ever moves down; a manual Retry - new information about the
+  network - restarts the walk at the top, and so does a fresh screen visit. Automatic reconnects
+  stay on their rung.
+
+Two implementation decisions that shape the tiers themselves:
+- **MSE demuxes by hand** (`FMP4Demuxer`, ~500 lines): surveyed again in ADR-012, no library
+  consumes a live fMP4 byte stream. The demuxer reads exactly what go2rtc emits and *rejects* the
+  shapes it never emits (absolute `base_data_offset`, `trun` without a data offset) instead of
+  guessing - a wrong guess corrupts video silently, an error escalates to MJPEG loudly.
+- **MJPEG requests are clamped to the detect stream** (`min(detect.height, 720)`,
+  `min(detect.fps, 5)`): the server JPEG-encodes *per connected client*, and anything above the
+  detect stream's own shape is upscaling paid for in server CPU.
+
+**Consequences:** every camera gets a live picture on every network (the P4.2 milestone), and the
+error cards from C5 become nearly unreachable - they now only appear when the *floor* fails.
+Worst-case walk to the floor is bounded by the 12s startup deadline per rung plus the MSE
+handshake deadline (4s), not by open-ended retries. No automatic climb *back up* exists yet
+(a user on MJPEG stays there until they leave the screen or retry); that is deliberate scope
+control, not an oversight.
+
 ## ADR-012 - Live view: Frigate exposes no live HLS; WebRTC first, MSE and MJPEG as separate later phases
 
 **Context:** `CLAUDE.md`, `VISION.md` and P4's original roadmap bullets all assumed v1 live view

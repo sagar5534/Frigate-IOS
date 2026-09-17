@@ -205,7 +205,10 @@ final class LiveCameraModelTests: XCTestCase {
             client: makeClient(),
             cameraName: "front_door",
             config: try makeConfig(),
-            factory: LivePlayerFactory { _, _ in player },
+            factory: LivePlayerFactory { transport, _ in
+                if case .webrtc = transport { return player }
+                return nil
+            },
             policy: budgetOnlyPolicy
         )
         model.start()
@@ -226,7 +229,10 @@ final class LiveCameraModelTests: XCTestCase {
             client: makeClient(),
             cameraName: "front_door",
             config: try makeConfig(),
-            factory: LivePlayerFactory { _, _ in player },
+            factory: LivePlayerFactory { transport, _ in
+                if case .webrtc = transport { return player }
+                return nil
+            },
             policy: budgetOnlyPolicy
         )
         model.start()
@@ -249,15 +255,23 @@ final class LiveCameraModelTests: XCTestCase {
     /// A stream that played, dropped, reconnected and then went silent has demonstrably working
     /// networking, so the failure must not be reported as "the camera sent no video". This is the
     /// case where the reconnect path has to carry `hasEverPlayed` across its own teardown.
+    ///
+    /// `maximumAttempts: 1` makes the post-reconnect failure *terminal*: the one allowed attempt is
+    /// spent by the first reconnect, so the stall's verdict stays observable instead of flashing
+    /// for the few milliseconds before another reconnect replaces it - a real flake source.
     func testHistoryOfPlayingSurvivesAnAutomaticReconnect() async throws {
         let player = FakeLivePlayer()
         var policy = fastPolicy
         policy.startupDeadline = .seconds(60)
+        policy.maximumAttempts = 1
         let model = LiveCameraModel(
             client: makeClient(),
             cameraName: "front_door",
             config: try makeConfig(),
-            factory: LivePlayerFactory { _, _ in player },
+            factory: LivePlayerFactory { transport, _ in
+                if case .webrtc = transport { return player }
+                return nil
+            },
             policy: policy
         )
         model.start()
@@ -323,7 +337,10 @@ final class LiveCameraModelTests: XCTestCase {
             client: makeClient(),
             cameraName: "front_door",
             config: try makeConfig(),
-            factory: LivePlayerFactory { _, _ in player },
+            factory: LivePlayerFactory { transport, _ in
+                if case .webrtc = transport { return player }
+                return nil
+            },
             policy: policy
         )
         model.start()
@@ -341,7 +358,10 @@ final class LiveCameraModelTests: XCTestCase {
             client: makeClient(),
             cameraName: "front_door",
             config: try makeConfig(),
-            factory: LivePlayerFactory { _, _ in player },
+            factory: LivePlayerFactory { transport, _ in
+                if case .webrtc = transport { return player }
+                return nil
+            },
             policy: policy
         )
         model.start()
@@ -427,5 +447,193 @@ final class LiveCameraModelTests: XCTestCase {
 
         try await Task.sleep(for: .milliseconds(60))
         XCTAssertEqual(model.state, .idle, "a stopped model must not report a deadline failure")
+    }
+
+    // MARK: Escalation down the ladder
+
+    private func makeLadderModel(
+        webrtc: FakeLivePlayer?,
+        mse: FakeLivePlayer? = nil,
+        mjpeg: FakeLivePlayer?,
+        policy: LiveCameraModel.Policy? = nil
+    ) throws -> LiveCameraModel {
+        let factory = LivePlayerFactory { transport, _ in
+            switch transport {
+            case .webrtc: return webrtc
+            case .mse: return mse
+            case .mjpeg: return mjpeg
+            }
+        }
+        return LiveCameraModel(
+            client: makeClient(),
+            cameraName: "front_door",
+            config: try makeConfig(),
+            factory: factory,
+            policy: policy ?? budgetOnlyPolicy
+        )
+    }
+
+    private func mjpegFake() -> FakeLivePlayer {
+        FakeLivePlayer(transport: .mjpeg(camera: "front_door", height: 720, fps: 5))
+    }
+
+    /// The reason escalation exists at all: a network that blocks port 8555 fails WebRTC
+    /// structurally, and the user should land on a working tier, not an error card.
+    func testIceFailureEscalatesToTheNextImplementedTier() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+        XCTAssertTrue(model.player === webrtc)
+
+        webrtc.simulate(.failed(.iceFailed))
+
+        XCTAssertTrue(model.player === mjpeg, "the model should have dropped to the MJPEG rung")
+        XCTAssertEqual(mjpeg.startCount, 1)
+        XCTAssertEqual(model.state, .connecting)
+        model.stop()
+    }
+
+    func testDecodeFailureEscalates() async throws {
+        let mse = FakeLivePlayer(transport: .mse(streamName: "cam1"))
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: nil, mse: mse, mjpeg: mjpeg)
+        model.start()
+        XCTAssertTrue(model.player === mse, "with no WebRTC build the walk starts at MSE")
+
+        mse.simulate(.failed(.decodeFailed))
+
+        XCTAssertTrue(model.player === mjpeg)
+        model.stop()
+    }
+
+    /// A tier that connected and showed nothing gets replaced, not retried: the lower tier reads a
+    /// genuinely different source (MJPEG comes off the detect pipeline, not the restream).
+    func testNoVideoEscalatesImmediately() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+
+        webrtc.simulate(.failed(.noVideo))
+
+        XCTAssertTrue(model.player === mjpeg)
+        XCTAssertEqual(webrtc.startCount, 1, "noVideo must not retry the silent tier first")
+        model.stop()
+    }
+
+    /// The first signaling retry refreshes a possibly-stale session cookie, which fixes the most
+    /// common cause - so the same rung gets exactly one more chance before the ladder moves on.
+    func testSignalingFailureRetriesTheSameRungOnceThenEscalates() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+
+        webrtc.simulate(.failed(.signalingFailed))
+        await waitUntil("the same-rung retry") { webrtc.startCount == 2 }
+        XCTAssertTrue(model.player === webrtc, "first failure retries the same tier")
+
+        webrtc.simulate(.failed(.signalingFailed))
+        await waitUntil("the escalation") { model.player === mjpeg }
+        model.stop()
+    }
+
+    /// `.connectionLost` means the tier demonstrably worked, so the full budget goes to restoring
+    /// it before quality is traded away.
+    func testConnectionLostSpendsTheBudgetOnItsTierBeforeEscalating() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+        await exhaustReconnectBudgetExpectingEscalation(model, webrtc, to: mjpeg)
+
+        XCTAssertEqual(
+            webrtc.startCount, budgetOnlyPolicy.maximumAttempts + 1,
+            "the whole budget belongs to the tier that was working"
+        )
+        XCTAssertTrue(model.player === mjpeg)
+        model.stop()
+    }
+
+    private func exhaustReconnectBudgetExpectingEscalation(
+        _ model: LiveCameraModel,
+        _ player: FakeLivePlayer,
+        to next: FakeLivePlayer
+    ) async {
+        for _ in 0...(budgetOnlyPolicy.maximumAttempts + 1) {
+            player.simulate(.failed(.connectionLost))
+            let startsBefore = player.startCount
+            for _ in 0..<400 where player.startCount == startsBefore && model.player !== next {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            if model.player === next { return }
+        }
+    }
+
+    func testEscalationCarriesPlaybackHistoryForFailureWording() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+        webrtc.simulate(.playing)
+        XCTAssertTrue(model.hasEverPlayed)
+
+        webrtc.simulate(.failed(.noVideo))
+
+        XCTAssertTrue(model.player === mjpeg)
+        XCTAssertTrue(model.hasEverPlayed, "history survives the tier change - it drives the status wording")
+        model.stop()
+    }
+
+    /// A reconnect of the floor tier must stay on the floor: climbing back up would re-fail the
+    /// tiers that already failed, costing seconds of black for nothing.
+    func testReconnectOnAnEscalatedTierStaysOnThatTier() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+        webrtc.simulate(.failed(.iceFailed))
+        XCTAssertTrue(model.player === mjpeg)
+
+        mjpeg.simulate(.failed(.connectionLost))
+        await waitUntil("the floor tier to reconnect") { mjpeg.startCount >= 2 }
+
+        XCTAssertEqual(webrtc.startCount, 1, "the failed top rung must not be restarted by a floor reconnect")
+        model.stop()
+    }
+
+    /// A person tapping Try Again is new information about the network, so the walk restarts at
+    /// the top - maybe WebRTC works now.
+    func testManualRetryAfterEscalationStartsBackAtTheTopRung() async throws {
+        let webrtc = FakeLivePlayer()
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: webrtc, mjpeg: mjpeg)
+        model.start()
+        webrtc.simulate(.failed(.iceFailed))
+        XCTAssertTrue(model.player === mjpeg)
+
+        model.retry()
+
+        XCTAssertTrue(model.player === webrtc)
+        XCTAssertEqual(webrtc.startCount, 2)
+        model.stop()
+    }
+
+    /// The bottom of the ladder keeps P4's behavior: structural failures with nothing below wait
+    /// for the user rather than spinning.
+    func testStructuralFailureOnTheBottomRungWaitsForTheUser() async throws {
+        let mjpeg = mjpegFake()
+        let model = try makeLadderModel(webrtc: nil, mjpeg: mjpeg)
+        model.start()
+        XCTAssertTrue(model.player === mjpeg)
+
+        mjpeg.simulate(.failed(.decodeFailed))
+
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(mjpeg.startCount, 1, "a structural failure with no rung below must not retry")
+        XCTAssertTrue(model.isAwaitingManualRetry)
+        XCTAssertEqual(model.state, .failed(.decodeFailed))
+        model.stop()
     }
 }

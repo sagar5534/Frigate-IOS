@@ -74,6 +74,51 @@ actor FrigateClient {
         return data
     }
 
+    /// A response that never ends, delivered as it arrives - the MJPEG live feed (P4.2), which is
+    /// one HTTP response streaming `multipart/x-mixed-replace` parts forever. `send`/`data` are
+    /// wrong for it by construction: they buffer to completion, and this response never completes.
+    ///
+    /// Same auth story as everything else: the session attaches the cookie jar, and a `401` gets
+    /// one silent re-login + retry before surfacing.
+    func byteStream(for endpoint: Endpoint) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        try await byteStream(for: endpoint, allowRetry: true)
+    }
+
+    private func byteStream(
+        for endpoint: Endpoint,
+        allowRetry: Bool
+    ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        let request = try makeRequest(endpoint)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await session.bytes(for: request)
+        } catch let urlError as URLError {
+            throw APIError.transport(urlError)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport(URLError(.badServerResponse))
+        }
+
+        switch http.statusCode {
+        case 200...299:
+            return (bytes, http)
+        case 401:
+            // The failed response's transfer must be cancelled explicitly - `data(for:)` reads
+            // bodies to completion, but an abandoned byte stream would otherwise hold its
+            // connection (and, for the MJPEG feed, a per-client encoder on the server) open.
+            bytes.task.cancel()
+            if allowRetry, let credentials {
+                try await credentials.reauthenticate(self)
+                return try await byteStream(for: endpoint, allowRetry: false)
+            }
+            throw APIError.unauthorized
+        default:
+            bytes.task.cancel()
+            throw APIError.http(status: http.statusCode, body: Data())
+        }
+    }
+
     // MARK: Core
 
     private func endpointURL(_ endpoint: Endpoint) throws -> URL {

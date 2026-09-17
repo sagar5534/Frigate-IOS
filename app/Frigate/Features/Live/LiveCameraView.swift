@@ -99,6 +99,13 @@ struct LiveStatusOverlay: View {
                 title: "No video from this camera",
                 message: "The connection worked but the camera sent no video. The snapshot below keeps updating."
             )
+        case .decodeFailed:
+            // Only reachable when every lower tier also failed to build - escalation normally
+            // swallows this one. Still worth honest copy for that day.
+            explanation(
+                title: "Can't play this stream",
+                message: "Video arrived but this device couldn't decode it. The snapshot below keeps updating."
+            )
         case .connectionLost:
             explanation(
                 title: "Live video stopped",

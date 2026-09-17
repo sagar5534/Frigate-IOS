@@ -23,9 +23,9 @@ three-tier ladder, and **each tier is its own phase**:
 
 | Phase | Tier | Status |
 |---|---|---|
-| **P4 (this plan)** | WebRTC via go2rtc | building now |
-| P4.1 | MSE (fMP4 over WebSocket) | deferred, demand-driven |
-| P4.2 | MJPEG (`multipart/x-mixed-replace`) | deferred, demand-driven |
+| **P4 (this plan)** | WebRTC via go2rtc | **done** |
+| P4.1 | MSE (fMP4 over WebSocket) | **done** (built straight off this plan's banked research; see ADR-013) |
+| P4.2 | MJPEG (`multipart/x-mixed-replace`) | **done** (same; escalation policy in ADR-013) |
 
 P4 builds **only the WebRTC rung**, but it builds **the whole ladder's seam**, so P4.1 and P4.2
 each land as one new `LivePlayer` conformer plus one case in a factory, with no call-site changes.
@@ -542,7 +542,9 @@ card, so "Try Again" only appears when it is actually the user's move.
 
 ## Deferred tiers: research already banked
 
-Recorded here so P4.1 and P4.2 need no re-research.
+**Both tiers have since been built from exactly this research** (`Features/Live/MSE/`,
+`Features/Live/MJPEG/`; escalation policy in ADR-013, status in `ROADMAP.md`). Kept as written
+because it documents the wire protocols the implementations assume.
 
 **MSE (P4.1).** Open `/live/mse/api/ws?src={stream}`, send
 `{"type":"mse","value":"<comma-separated codecs>"}`, receive a text ack naming the negotiated

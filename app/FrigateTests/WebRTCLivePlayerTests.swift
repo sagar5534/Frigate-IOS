@@ -23,28 +23,20 @@ final class WebRTCLivePlayerTests: XCTestCase {
 
     // MARK: Factory
 
-    func testFactoryBuildsAWebRTCPlayerForARestreamedLadder() {
-        let ladder: [LiveTransport] = [
+    /// Every tier of the ladder now has an implementation, and the player each rung builds must
+    /// carry the transport it was asked for - that is what escalation reports and what the ladder
+    /// walk in `LiveCameraModel` relies on.
+    func testFactoryBuildsAPlayerForEveryTier() {
+        let transports: [LiveTransport] = [
             .webrtc(streamName: "front_door_hi"),
             .mse(streamName: "front_door_hi"),
-            .mjpeg(camera: "front_door"),
+            .mjpeg(camera: "front_door", height: 720, fps: 5),
         ]
-        let built = LivePlayerFactory().makePlayer(for: ladder, client: makeClient())
-        player = built
-
-        XCTAssertEqual(built?.transport, .webrtc(streamName: "front_door_hi"))
-    }
-
-    /// The tiers that don't exist yet are not errors - the caller keeps the P2 snapshot and reports
-    /// live unavailable. This test flips to a real player when P4.1 or P4.2 lands, which is exactly
-    /// the signal wanted at that point.
-    func testFactoryReturnsNilForTiersNotBuiltYet() {
-        let ladder: [LiveTransport] = [.mse(streamName: "front_door_hi"), .mjpeg(camera: "front_door")]
-        XCTAssertNil(LivePlayerFactory().makePlayer(for: ladder, client: makeClient()))
-    }
-
-    func testFactoryReturnsNilForAnEmptyLadder() {
-        XCTAssertNil(LivePlayerFactory().makePlayer(for: [], client: makeClient()))
+        for transport in transports {
+            let built = LivePlayerFactory().makePlayer(for: transport, client: makeClient())
+            XCTAssertEqual(built?.transport, transport)
+            built?.stop()
+        }
     }
 
     // MARK: Connection-state mapping

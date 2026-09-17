@@ -1,5 +1,8 @@
 import SwiftUI
-@testable import Frigate
+// @preconcurrency: the app module compiles with Approachable Concurrency, which infers @Sendable
+// on the protocol's @MainActor closure properties; the test target does not, so a plain import
+// warns about the sendability mismatch on this conformance.
+@preconcurrency @testable import Frigate
 
 /// A `LivePlayer` whose transitions the test drives directly, so `LiveCameraModel`'s policy can be
 /// exercised without a server, a peer connection, or a stopwatch.

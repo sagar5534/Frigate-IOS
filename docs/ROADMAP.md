@@ -138,25 +138,42 @@ Two real bugs were found only by doing this (see `LEARNINGS.md`): renderers sile
 because the `RTCVideoTrack` wrapper wasn't retained, and the startup deadline blamed port 8555 for a
 connection that had already succeeded._
 
-## P4.1 - Live video: MSE tier
-Demand-driven, not scheduled. Real H.264 at ~1-2s over the **same authenticated HTTPS origin**, so
-it reaches users behind Cloudflare Tunnel and other setups WebRTC's port-8555 media path cannot
-cross. Hand-written fMP4 demuxer into `AVSampleBufferDisplayLayer` (~400-600 lines); no library
-exists that consumes a live fMP4 byte stream (surveyed in ADR-012). Slots in as one `LivePlayer`
-conformer plus one case in `LivePlayerFactory`.
-- [ ] `MSELivePlayer` behind the existing seam
-- [ ] Automatic escalation down the ladder when the tier above fails
+## P4.1 - Live video: MSE tier - DONE
+Real H.264/H.265 at ~1-2s over the **same authenticated HTTPS origin**, so it reaches users behind
+Cloudflare Tunnel and other setups WebRTC's port-8555 media path cannot cross.
+- [x] `MSELivePlayer` behind the existing seam - `Features/Live/MSE/`: `FMP4Demuxer` (hand-written
+  incremental fMP4 demuxer, H.264 `avcC` + H.265 `hvcC`, rejects shapes go2rtc never emits rather
+  than guessing), `VideoSampleBufferFactory`, `SampleBufferVideoView`
+  (`AVSampleBufferDisplayLayer`), `MSELivePlayer` (codec handshake over the shared `LiveSocket`'s
+  new `MediaChannel` view, renderer + `AVSampleBufferRenderSynchronizer` pinned near the live
+  edge, 4s handshake deadline, renderer failure -> `.decodeFailed`). Demuxer tested against
+  hand-built segments using real x264/x265 parameter sets that VideoToolbox validates
+- [x] Automatic escalation down the ladder when the tier above fails - `LiveCameraModel` walks the
+  ladder: structural failures (`.iceFailed`, `.decodeFailed`) and silent tiers (`.noVideo`)
+  escalate immediately, `.signalingFailed` retries once (session refresh) first, `.connectionLost`
+  spends its retry budget before trading down. Policy recorded as ADR-013
 
 _Milestone: a user whose network blocks WebRTC still gets real video._
 
-## P4.2 - Live video: MJPEG tier
+## P4.2 - Live video: MJPEG tier - DONE
 The floor: `multipart/x-mixed-replace` off the existing `FrigateClient` path. No ports, no YAML, no
 go2rtc. Also the **only** option for cameras with no restream configured, so this tier is what
 makes live view work for every camera rather than most.
-- [ ] `MJPEGLivePlayer` behind the existing seam
-- [ ] Non-restreamed cameras resolve to this tier automatically
+- [x] `MJPEGLivePlayer` behind the existing seam - `Features/Live/MJPEG/`: `MultipartFrameParser`
+  (incremental, splits on the spec's `\r\n--boundary` delimiter so JPEG bytes can't tear a frame,
+  emits a frame from its own EOI terminator instead of waiting 1/fps for the next boundary) +
+  `MJPEGLivePlayer` over the new `FrigateClient.byteStream(for:)` (same silent 401 re-login as
+  everything else). Requests are clamped to the camera's detect config (new
+  `FrigateConfig.DetectInfo`), since the server JPEG-encodes per connected client
+- [x] Non-restreamed cameras resolve to this tier automatically - `LiveStreamSource.ladder` has
+  always put `.mjpeg` last for every camera and alone for non-restreamed ones; the factory now
+  builds it
 
 _Milestone: every camera shows motion, on every network._
+_Status: implemented and unit-tested (261 tests, up from 203 after P4; zero build warnings). The
+four real-server integration gates in `LiveServerIntegrationTests` (WebRTC signaling x2, MSE
+handshake+demux, MJPEG feed+decode) skip without credentials - **run them and a device pass
+before calling the ladder verified end-to-end**; see "To verify" below._
 
 ---
 
@@ -191,3 +208,12 @@ _Milestone: feature parity with the PWA._
   `auth_request` on `/live/webrtc/api/ws` (C2 proves this before any WebRTC code exists)
 - **P4:** whether go2rtc's advertised ICE candidates are reachable from cellular and from LAN on
   the real server, and what the app-size hit of the libwebrtc xcframework actually is
+- **P4.1/P4.2, not yet done:** the real-server gates in `LiveServerIntegrationTests`
+  (`testMSESocketNegotiatesAndStreamsParsableMedia`, `testMJPEGFeedStreamsDecodableFrames`) -
+  they skip without `TEST_RUNNER_FRIGATE_TEST_*` credentials, and no session with credentials has
+  run them yet. They are the check that go2rtc's actual fMP4 matches what `FMP4Demuxer` accepts
+  and that the MJPEG boundary parsing holds against real traffic
+- **P4.1/P4.2, not yet done:** an end-to-end escalation pass in the app - block port 8555 (or use
+  a network that does) and watch a camera land on MSE; disable a camera's restream and confirm
+  MJPEG plays; check MSE's live-edge latency and the decode-session budget with the Recent
+  Activity strip on screen

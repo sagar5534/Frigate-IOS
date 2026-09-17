@@ -108,25 +108,43 @@ per-object events; see `../DECISIONS.md` ADR-009 for why).
 - `Networking/Endpoint.swift`'s `basePath` field (ADR-010) lets `reviewThumbnail`/`reviewClipHLS`
   address routes outside `/api/` through the same client/auth/retry path as everything else.
 
-## Feature: Live video (P4)
+## Feature: Live video (P4 / P4.1 / P4.2)
 
-WebRTC through go2rtc, on the camera detail screen only. Frigate exposes **no live HLS** at all -
-see `../DECISIONS.md` ADR-012 for the finding and the WebRTC -> MSE -> MJPEG tier ladder it produced.
+The full three-tier ladder, on the camera detail screen only. Frigate exposes **no live HLS** at
+all - see `../DECISIONS.md` ADR-012 for the finding and the WebRTC -> MSE -> MJPEG ladder it
+produced, and ADR-013 for how failures walk down it.
 
-- `Models/LiveTransport.swift` - `LiveTransport` enumerates all three tiers; `LiveStreamSource`
-  resolves a camera to an ordered ladder. Only `.webrtc` has an implementation today. Which stream
-  to open is decided by *label* (a main-stream label beats a sub-stream one) rather than by
-  position, because JSON key order does not survive `JSONDecoder` - see `../LEARNINGS.md`.
+Shared seam:
+
+- `Models/LiveTransport.swift` - `LiveTransport` enumerates the three tiers; `LiveStreamSource`
+  resolves a camera to an ordered ladder. Which go2rtc stream to open is decided by *label* (a
+  main-stream label beats a sub-stream one) rather than by position, because JSON key order does
+  not survive `JSONDecoder` - see `../LEARNINGS.md`. The MJPEG rung carries `height`/`fps` clamped
+  to the camera's detect config (`FrigateConfig.DetectInfo`), because the server re-encodes JPEGs
+  per connected client and asking above the detect stream only upscales.
 - `Features/Live/LivePlayer.swift` - the seam. A protocol plus `LivePlayerState`/`LivePlayerError`
-  and `LivePlayerFactory`, which builds the best rung implemented in this build and returns `nil`
-  when none are. P4.1 (MSE) and P4.2 (MJPEG) each land as one conformer plus one factory case.
-  `.playing` means **pixels on screen**, not merely "the transport connected".
+  and `LivePlayerFactory`, which builds the player for one rung (or `nil` if that tier isn't in
+  this build). `.playing` means **pixels on screen**, not merely "the transport connected".
+- `Features/Live/LiveCameraModel.swift` - lifecycle, reconnect policy, deadlines, teardown, and
+  **escalation**: structural failures (`.iceFailed`, `.decodeFailed`) and silent tiers (`.noVideo`)
+  drop to the next rung immediately, `.signalingFailed` gets one same-rung retry (it refreshes a
+  possibly-stale session cookie) first, and `.connectionLost` spends the whole retry budget on the
+  tier that was demonstrably working before trading down. The policy lives here, not in players,
+  so every tier inherits it identically.
+- `Networking/LiveSocket.swift` - an actor over `URLSessionWebSocketTask`, built from
+  `FrigateClient`'s own session so it inherits the cookie jar and the insecure-trust delegate. One
+  socket type serves both live protocols: `SignalingChannel` (text, WebRTC) and `MediaChannel`
+  (text + binary, MSE) are its two views, and both exist so the protocols can be tested against
+  scripted channels.
+- `Features/Cameras/CameraDetailView.swift` - the only place live runs. The camera list stays on the
+  P2 snapshot loop ("never live-stream a grid"), and the snapshot stays *underneath* the video
+  rather than being swapped out, so a failure degrades to a working picture.
+
+WebRTC tier (P4):
+
 - `Features/Live/WebRTCSignaling.swift` - go2rtc's `{"type","value"}` envelope and the handshake
   ordering rule that matters: candidates arriving before the answer are held and released after it,
   since `RTCPeerConnection.add(_:)` rejects them otherwise.
-- `Networking/LiveSocket.swift` - an actor over `URLSessionWebSocketTask`, built from
-  `FrigateClient`'s own session so it inherits the cookie jar and the insecure-trust delegate.
-  Conforms to `SignalingChannel`, which is what makes the handshake testable without a server.
 - `Features/Live/WebRTCLivePlayer.swift` - peer connection lifecycle, video-only `recvonly`
   negotiation, and the connection-state mapping (extracted as a pure `nextState(for:…)` so the
   decisions behind the user-facing errors are unit-tested).
@@ -134,15 +152,42 @@ see `../DECISIONS.md` ADR-012 for the finding and the WebRTC -> MSE -> MJPEG tie
   because libwebrtc calls them from its own threads. The frame observer is an `RTCVideoRenderer` on
   the track rather than a delegate of the video view; `../LEARNINGS.md` explains why that
   distinction cost an evening.
-- `Features/Live/LiveCameraModel.swift` - lifecycle, reconnect policy, deadlines and teardown. The
-  policy lives here rather than in the player so every future tier inherits it.
-- `Features/Cameras/CameraDetailView.swift` - the only place live runs. The camera list stays on the
-  P2 snapshot loop ("never live-stream a grid"), and the snapshot stays *underneath* the video
-  rather than being swapped out, so a failure degrades to a working picture.
+
+MSE tier (P4.1) - `Features/Live/MSE/`:
+
+- `FMP4Demuxer.swift` - a hand-written incremental demuxer for go2rtc's live fMP4 stream
+  (`ftyp`+`moov` init, then `moof`+`mdat` pairs): H.264 via `avcC` and H.265 via `hvcC` into a
+  `CMVideoFormatDescription`, `trun`/`tfhd`/`tfdt`/`trex` into timed samples. No library consumes
+  a live fMP4 byte stream (surveyed in ADR-012), and the subset go2rtc emits is small; shapes it
+  never emits (absolute `base_data_offset`, a `trun` with no data offset) are rejected loudly as
+  `.unsupported` rather than guessed at. `VideoSampleBufferFactory` turns samples into
+  `CMSampleBuffer`s.
+- `MSELivePlayer.swift` - opens `/live/mse/api/ws?src=…` (same cookie-authed origin as everything
+  else), sends the `{"type":"mse","value":"<codecs>"}` handshake (video-only, H.264+H.265), feeds
+  binary frames through the demuxer into `AVSampleBufferDisplayLayer`'s renderer, and drives an
+  `AVSampleBufferRenderSynchronizer` pinned near the live edge (drift beyond ~3s snaps forward,
+  as the PWA does on iOS). A 4s handshake deadline turns "socket open, nothing sent" into
+  `.signalingFailed`; a renderer failure means these bytes can't play here and maps to
+  `.decodeFailed`.
+- `SampleBufferVideoView.swift` - the player-owned `AVSampleBufferDisplayLayer` host view;
+  transparent until it renders, preserving the snapshot-underneath trick.
+
+MJPEG tier (P4.2) - `Features/Live/MJPEG/`:
+
+- `MultipartFrameParser.swift` - incremental `multipart/x-mixed-replace` parser. Body scanning uses
+  the spec's real delimiter (`\r\n--boundary`) so boundary-looking bytes inside JPEG data can't
+  tear a frame, and a body ending in the JPEG EOI marker plus the part's blank line is emitted
+  immediately rather than waiting 1/fps for the next boundary to arrive.
+- `MJPEGLivePlayer.swift` - streams `GET /api/{camera}?height=…&fps=…` through
+  `FrigateClient.byteStream(for:)` (same 401 re-login as everything else), decodes each part with
+  `UIImage`, and shows it in a player-owned `UIImageView`. The floor tier: works for every camera
+  on every network, including cameras with no restream at all - and the only tier where "first
+  frame" literally is pixels on screen.
 
 Diagnostics go to `com.sagarp.Frigate` / `live` (`LiveLog`), including an `inbound-rtp` probe -
 `bytesReceived` and `framesDecoded` are what separate "the media path is blocked" from "the media
-path works and nothing is consuming it", which look identical on screen.
+path works and nothing is consuming it", which look identical on screen. Escalations are logged
+with the from/to tiers.
 
 ## App shell
 

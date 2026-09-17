@@ -13,7 +13,7 @@ nonisolated enum SignalingMessage: Equatable, Sendable {
     case candidate(String)
 }
 
-extension SignalingMessage {
+nonisolated extension SignalingMessage {
     private struct Envelope: Codable {
         let type: String
         let value: String

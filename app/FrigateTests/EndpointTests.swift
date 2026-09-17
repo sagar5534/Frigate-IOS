@@ -128,4 +128,24 @@ final class EndpointTests: XCTestCase {
         XCTAssertEqual(endpoint.query, [URLQueryItem(name: "src", value: "front_door_hi")])
         XCTAssertEqual(endpoint.method, .get)
     }
+
+    func testMSEWebSocketEndpointAddressesServerRootNotAPI() {
+        let endpoint = Endpoint.mseWebSocket(src: "front_door_hi")
+        XCTAssertEqual(endpoint.path, "live/mse/api/ws")
+        XCTAssertNil(endpoint.basePath, "nginx mounts the same go2rtc socket at /live/mse/, off the root")
+        XCTAssertEqual(endpoint.query, [URLQueryItem(name: "src", value: "front_door_hi")])
+        XCTAssertEqual(endpoint.method, .get)
+    }
+
+    /// The MJPEG feed is `/api/{camera}` - unlike the sockets it *is* an API route, and the
+    /// height/fps clamp travels in the query.
+    func testMJPEGFeedEndpointStaysUnderAPIWithItsParameters() {
+        let endpoint = Endpoint.mjpegFeed(camera: "front_door", height: 480, fps: 5)
+        XCTAssertEqual(endpoint.path, "front_door")
+        XCTAssertEqual(endpoint.basePath, "api")
+        XCTAssertEqual(endpoint.query, [
+            URLQueryItem(name: "height", value: "480"),
+            URLQueryItem(name: "fps", value: "5"),
+        ])
+    }
 }

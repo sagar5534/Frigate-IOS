@@ -76,21 +76,56 @@ nonisolated struct FrigateConfig: Decodable, Equatable, Sendable {
     struct CameraConfig: Decodable, Equatable, Sendable {
         let enabled: Bool
         let live: LiveInfo
+        let detect: DetectInfo
 
-        init(enabled: Bool = true, live: LiveInfo = LiveInfo()) {
+        init(enabled: Bool = true, live: LiveInfo = LiveInfo(), detect: DetectInfo = DetectInfo()) {
             self.enabled = enabled
             self.live = live
+            self.detect = detect
         }
 
         private enum CodingKeys: String, CodingKey {
             case enabled
             case live
+            case detect
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
             live = try container.decodeIfPresent(LiveInfo.self, forKey: .live) ?? LiveInfo()
+            detect = try container.decodeIfPresent(DetectInfo.self, forKey: .detect) ?? DetectInfo()
+        }
+    }
+
+    /// The detect stream's shape - what the MJPEG tier (P4.2) is actually re-encoding, and
+    /// therefore the ceiling worth asking that endpoint for.
+    ///
+    /// `width`/`height` are optional *in the server's own model* (`DetectConfig`): when the user
+    /// leaves them unset they are resolved from the stream at runtime, and depending on version and
+    /// timing the config API can return them as `null`. `fps` has a real server-side default (5).
+    nonisolated struct DetectInfo: Decodable, Equatable, Sendable {
+        let width: Int?
+        let height: Int?
+        let fps: Int
+
+        init(width: Int? = nil, height: Int? = nil, fps: Int = 5) {
+            self.width = width
+            self.height = height
+            self.fps = fps
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case width
+            case height
+            case fps
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            width = try container.decodeIfPresent(Int.self, forKey: .width)
+            height = try container.decodeIfPresent(Int.self, forKey: .height)
+            fps = try container.decodeIfPresent(Int.self, forKey: .fps) ?? 5
         }
     }
 

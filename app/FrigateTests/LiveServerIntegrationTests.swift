@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Frigate
 
@@ -109,6 +110,102 @@ final class LiveServerIntegrationTests: XCTestCase {
         XCTAssertNotNil(request.value(forHTTPHeaderField: "Cookie"), "login should have produced a session cookie")
 
         try await openAndPing(request, session: makeSession())
+    }
+
+    /// The P4.1 gate: go2rtc's MSE endpoint answers our codec handshake and streams fMP4 that
+    /// `FMP4Demuxer` actually parses - a track from the init segment, then real samples. This is
+    /// the one check no fixture can stand in for, because the fixture and the demuxer share an
+    /// author.
+    func testMSESocketNegotiatesAndStreamsParsableMedia() async throws {
+        let server = try requireServer()
+        let client = FrigateClient(baseURL: server.baseURL, session: makeSession())
+        try await client.login(user: server.user, password: server.password)
+        let config = try await client.fetchConfig()
+
+        let mseStream = config.enabledCameraNames
+            .flatMap { LiveStreamSource.ladder(camera: $0, config: config) }
+            .compactMap { if case .mse(let name) = $0 { return name } else { return nil } }
+            .first
+        guard let mseStream else {
+            throw XCTSkip("no enabled camera on this server resolves to MSE - nothing to open")
+        }
+
+        let socket = try await client.liveSocket(for: .mseWebSocket(src: mseStream))
+        await socket.start()
+        defer { Task { await socket.close() } }
+        try await socket.send(MSELivePlayer.handshakeRequest())
+
+        var demuxer = FMP4Demuxer()
+        var negotiated: String?
+        var sawTrack = false
+        var sampleCount = 0
+        let deadline = ContinuousClock.now + .seconds(10)
+
+        for await frame in await socket.frames() {
+            switch frame {
+            case .text(let json):
+                if let ack = MSELivePlayer.decodeHandshakeAck(json) {
+                    negotiated = ack
+                    print("[P4.1] \(mseStream) negotiated: \(ack)")
+                }
+            case .data(let data):
+                for event in try demuxer.append(data) {
+                    switch event {
+                    case .track: sawTrack = true
+                    case .samples(let samples): sampleCount += samples.count
+                    }
+                }
+            }
+            if sawTrack && sampleCount > 0 { break }
+            if ContinuousClock.now > deadline { break }
+        }
+
+        XCTAssertNotNil(negotiated, "go2rtc should ack the mse handshake")
+        XCTAssertTrue(sawTrack, "the init segment should demux to a video track")
+        XCTAssertGreaterThan(sampleCount, 0, "fragments should demux to samples")
+    }
+
+    /// The P4.2 gate: `/api/{camera}` streams multipart JPEGs that the parser splits and UIKit
+    /// decodes - proving the boundary handling against the real server, not just against parts
+    /// these tests wrote themselves.
+    func testMJPEGFeedStreamsDecodableFrames() async throws {
+        let server = try requireServer()
+        let client = FrigateClient(baseURL: server.baseURL, session: makeSession())
+        try await client.login(user: server.user, password: server.password)
+        let config = try await client.fetchConfig()
+
+        let mjpegRung = config.enabledCameraNames
+            .flatMap { LiveStreamSource.ladder(camera: $0, config: config) }
+            .compactMap { transport -> (String, Int, Int)? in
+                if case .mjpeg(let camera, let height, let fps) = transport { return (camera, height, fps) }
+                return nil
+            }
+            .first
+        guard let (camera, height, fps) = mjpegRung else {
+            throw XCTSkip("no enabled cameras on this server")
+        }
+
+        let (bytes, response) = try await client.byteStream(for: .mjpegFeed(camera: camera, height: height, fps: fps))
+        XCTAssertEqual(response.statusCode, 200)
+
+        var parser = MultipartFrameParser(boundary: MJPEGLivePlayer.boundary(from: response))
+        var frames: [Data] = []
+        var chunk: [UInt8] = []
+        let deadline = ContinuousClock.now + .seconds(10)
+        for try await byte in bytes {
+            chunk.append(byte)
+            if chunk.count >= 2048 || byte == 0x0A {
+                frames.append(contentsOf: try parser.append(chunk))
+                chunk.removeAll(keepingCapacity: true)
+            }
+            if frames.count >= 2 || ContinuousClock.now > deadline { break }
+        }
+
+        print("[P4.2] \(camera) height=\(height) fps=\(fps): \(frames.count) frames, sizes \(frames.map(\.count))")
+        XCTAssertGreaterThanOrEqual(frames.count, 2, "the feed should produce a steady stream of parts")
+        for frame in frames {
+            XCTAssertNotNil(UIImage(data: frame), "every part should be a decodable JPEG")
+        }
     }
 
     /// The other half: if the socket opens without a cookie too, then `auth_request` is not

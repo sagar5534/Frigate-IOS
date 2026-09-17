@@ -378,3 +378,32 @@ Two habits that would have caught all three:
 Worth noting how each was found: the first by `inbound-rtp` statistics, the second and third by
 running the app and looking at it. None were visible to the unit tests that existed at the time, and
 the third was introduced *by* the fix for the second.
+
+## `JSONEncoder` key order is not stable either - don't string-compare encoded JSON in tests
+
+The P4 sibling of the `allKeys` finding, caught on the other side of the pipe: a test asserted the
+MSE handshake was sent by comparing the recorded frame to a freshly encoded one as *strings*, and
+failed intermittently because `JSONEncoder` emits object keys in whatever order the dictionary
+hashes to - two encodes of the same value need not produce the same bytes. Wire consumers don't
+care (JSON objects are unordered), so the fix is to compare *decoded* values, or pass
+`.sortedKeys` when byte-stable output genuinely matters.
+
+## Approachable Concurrency mismatches between app and test targets surface as conformance warnings
+
+The app target compiles with `SWIFT_APPROACHABLE_CONCURRENCY = YES`, which (among other things)
+infers `@Sendable` on `@MainActor` closure types. The test target does not, so a test double
+conforming to an app protocol with such closure properties (`FakeLivePlayer: LivePlayer`) warns
+that the "sendability of function types does not match requirement". Aligning the test target's
+settings is the clean fix in theory, but in practice it flipped the *default isolation* of every
+test helper too and produced a dozen new warnings in existing tests; the targeted fix is
+`@preconcurrency @testable import Frigate` in the file declaring the conformance. Worth revisiting
+if the test target ever migrates to the same settings wholesale.
+
+## Default-argument closures don't get the isolation checking you expect
+
+`init(makeChannel: MakeChannel = { client, src in try await client.liveSocket(...) })` compiled
+with "no 'async' operations occur within 'await' expression" warnings on calls that are
+definitely cross-actor awaits. Whatever the compiler is inferring for closure literals in default
+arguments, it is not what the same code means as a real function. Moving the default into a
+`private nonisolated static func` and using `makeChannel ?? Self.openSocket` restored ordinary,
+comprehensible isolation - and reads better anyway.

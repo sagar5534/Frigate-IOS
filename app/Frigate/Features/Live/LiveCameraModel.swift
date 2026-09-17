@@ -1,11 +1,12 @@
 import Foundation
 import Observation
+import OSLog
 
 /// Owns one camera's live view: which rung of the ladder to play, the player's lifecycle, the
-/// reconnect policy, and what to tell the user when it doesn't work.
+/// reconnect policy, **escalation down the ladder when a tier fails**, and what to tell the user
+/// when nothing works.
 ///
-/// The policy lives here rather than in `WebRTCLivePlayer` so it applies to every tier - when MSE
-/// (P4.1) and MJPEG (P4.2) land they inherit reconnect, deadlines and teardown for free.
+/// The policy lives here rather than in the players so it applies to every tier identically.
 @MainActor
 @Observable
 final class LiveCameraModel {
@@ -22,13 +23,16 @@ final class LiveCameraModel {
     private var reconnectTask: Task<Void, Never>?
     private var deadlineTask: Task<Void, Never>?
     private var reconnectAttempt = 0
+    /// Which rung of the ladder is (or was last) playing. Escalation only ever moves it down;
+    /// only a fresh `start()` after `stop()`, or the user's own retry, returns to the top.
+    private var rungIndex = 0
     /// Whether video has ever arrived on this camera in this session. Decides what a later failure
     /// is *about*, which is the difference between useful advice and misleading advice - and what a
     /// pause should be *called*, since nothing can be "reconnecting" that never connected.
     private(set) var hasEverPlayed = false
 
     /// Timings, injectable so tests don't sleep through them.
-    struct Policy {
+    nonisolated struct Policy {
         /// How long a connection attempt may sit in `.connecting` before we call it a failure.
         /// libwebrtc's own ICE timeout is far longer - tens of seconds - which is an unacceptable
         /// spinner for someone who just tapped a camera. Failing early with a specific reason beats
@@ -85,14 +89,34 @@ final class LiveCameraModel {
     func start() {
         guard player == nil else { return }
 
-        guard let player = factory.makePlayer(for: ladder, client: client) else {
-            // No implemented tier for this camera. Not an error to shout about: the snapshot view
-            // behind this is still perfectly good, and until P4.1/P4.2 land this is the honest
-            // state for a camera with no go2rtc restream.
+        guard startRung(from: rungIndex) else {
+            // No implemented tier could be built for this camera. Not an error to shout about:
+            // the snapshot view behind this is still perfectly good.
             state = .failed(.notAvailable)
             return
         }
+    }
 
+    /// Builds and starts the best implemented rung at or below `index`. `false` when none of the
+    /// remaining rungs can be built, in which case nothing was changed.
+    @discardableResult
+    private func startRung(from index: Int) -> Bool {
+        guard let (rung, player) = buildRung(from: index) else { return false }
+        rungIndex = rung
+        attach(player)
+        return true
+    }
+
+    private func buildRung(from index: Int) -> (Int, any LivePlayer)? {
+        for candidate in index..<ladder.count {
+            if let player = factory.makePlayer(for: ladder[candidate], client: client) {
+                return (candidate, player)
+            }
+        }
+        return nil
+    }
+
+    private func attach(_ player: any LivePlayer) {
         player.onStateChange = { [weak self] newState in
             self?.handle(newState)
         }
@@ -102,20 +126,36 @@ final class LiveCameraModel {
         self.player = player
         state = .connecting
         player.start()
-        startDeadline(policy.startupDeadline, reason: .iceFailed)
+        startDeadline(policy.startupDeadline, reason: Self.startupFailure(for: player.transport))
+    }
+
+    /// What a hopelessly stuck startup *means* differs by tier: WebRTC stuck in `.connecting` is
+    /// the port-8555 media path not connecting, while the origin-riding tiers have nothing but the
+    /// server to blame.
+    private static func startupFailure(for transport: LiveTransport) -> LivePlayerError {
+        if case .webrtc = transport { return .iceFailed }
+        return .signalingFailed
     }
 
     /// Full teardown. Idempotent, and safe from `onDisappear`, a scene-phase change or a tab switch.
     func stop() {
         cancelTimers()
         reconnectAttempt = 0
+        rungIndex = 0
         hasEverPlayed = false
-        videoAspectRatio = nil
+        detachPlayer()
+        state = .idle
+    }
+
+    /// Tears down just the player, leaving the session's bookkeeping (`reconnectAttempt`,
+    /// `hasEverPlayed`, `rungIndex`) alone - the piece shared by full stops, reconnects, and
+    /// escalations, which differ only in what happens to that bookkeeping.
+    private func detachPlayer() {
         player?.onStateChange = nil
         player?.onVideoSizeChange = nil
         player?.stop()
         player = nil
-        state = .idle
+        videoAspectRatio = nil
     }
 
     /// User-initiated. Resets the backoff, because a person tapping Retry is new information.
@@ -151,19 +191,34 @@ final class LiveCameraModel {
         }
     }
 
-    /// Auto-reconnect, but only for failures where trying again could plausibly work.
+    /// The recovery policy: escalate down the ladder when a failure is structural for the tier,
+    /// retry in place when it is plausibly transient, and hand over to the user when neither is
+    /// left. What each failure gets, and why:
     ///
-    /// `.iceFailed` is excluded on purpose. It means negotiation succeeded and no candidate pair
-    /// ever connected, which is a structural fact about the network - port 8555 is not reachable
-    /// from here - and hammering it changes nothing except the battery. That one waits for a person.
+    /// - `.iceFailed` / `.decodeFailed` - structural facts about the tier (port 8555 unreachable;
+    ///   bytes this device can't play). Retrying changes nothing, so escalate immediately; with no
+    ///   rung below, wait for a person.
+    /// - `.noVideo` - the tier connected and showed nothing. A lower tier is a genuinely different
+    ///   source path (MJPEG comes off the detect pipeline, not the restream), so prefer it over
+    ///   retrying a tier that already demonstrated silence.
+    /// - `.signalingFailed` - one same-rung retry first, because the retry path refreshes a
+    ///   possibly-stale session cookie and that fixes the most common cause; if the second attempt
+    ///   fails too, escalate.
+    /// - `.connectionLost` - this tier demonstrably *worked*, so spend the whole retry budget on it
+    ///   before trading down in quality.
     private func scheduleReconnect(after error: LivePlayerError) {
         switch error {
-        case .iceFailed, .notAvailable:
+        case .notAvailable:
             return
-        case .signalingFailed, .connectionLost, .noVideo:
-            // All three can be transient - a restarting server, a flapping network, a camera coming
-            // back up - so they are worth a bounded retry.
-            break
+        case .iceFailed, .decodeFailed:
+            _ = escalate()
+            return
+        case .noVideo:
+            if escalate() { return }
+        case .signalingFailed:
+            if reconnectAttempt >= 1, escalate() { return }
+        case .connectionLost:
+            if reconnectAttempt >= policy.maximumAttempts, escalate() { return }
         }
 
         guard reconnectAttempt < policy.maximumAttempts else { return }
@@ -185,18 +240,33 @@ final class LiveCameraModel {
             }
             guard !Task.isCancelled else { return }
             self.reconnectTask = nil
-            // `stop()` is also the user-facing teardown, so it clears both of these. An automatic
-            // reconnect is a continuation of the same session, not a fresh one: the attempt count
-            // has to survive or the chain never terminates, and `hasEverPlayed` has to survive or a
-            // stream that played, dropped and reconnected would report the next silence as
-            // "the camera sent no video" instead of a lost connection.
-            let attempt = self.reconnectAttempt
-            let played = self.hasEverPlayed
-            self.stop()
-            self.reconnectAttempt = attempt
-            self.hasEverPlayed = played
-            self.start()
+            // Deliberately not `stop()` + `start()`: those are the user-facing session boundary
+            // and reset the attempt count (the chain would never terminate), `hasEverPlayed`
+            // (a later silence would be blamed on the camera instead of the connection), and the
+            // rung (a retry of the MJPEG floor would climb back up to re-fail the tiers that
+            // already failed). An automatic reconnect replaces only the player.
+            self.cancelTimers()
+            self.detachPlayer()
+            self.startRung(from: self.rungIndex)
         }
+    }
+
+    /// Falls to the next implemented rung of the ladder, carrying the session's history
+    /// (`hasEverPlayed` drives failure wording) but a fresh retry budget - the new tier hasn't
+    /// failed yet. Returns `false` from the bottom rung **without touching anything**: the
+    /// reported failure, the failed player, and the spent retry budget all stand, so the caller's
+    /// fallback logic sees the world as it was.
+    private func escalate() -> Bool {
+        guard let (rung, next) = buildRung(from: rungIndex + 1) else { return false }
+
+        let failedTransport = player?.transport
+        cancelTimers()
+        detachPlayer()
+        reconnectAttempt = 0
+        rungIndex = rung
+        attach(next)
+        LiveLog.logger.info("escalating live tier camera=\(self.cameraName, privacy: .public) from=\(String(describing: failedTransport), privacy: .public) to=\(String(describing: self.ladder[rung]), privacy: .public)")
+        return true
     }
 
     /// A session refresh that cannot hold the reconnect hostage.

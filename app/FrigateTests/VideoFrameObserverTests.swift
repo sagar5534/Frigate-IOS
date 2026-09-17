@@ -21,23 +21,23 @@ final class VideoFrameObserverTests: XCTestCase {
     }
 
     func testFirstFrameIsReportedExactlyOnce() {
-        var reports = 0
-        let observer = VideoFrameObserver(onFirstFrame: { reports += 1 }, onSize: { _ in })
+        let reports = Counter()
+        let observer = VideoFrameObserver(onFirstFrame: { _ = reports.increment() }, onSize: { _ in })
 
         for _ in 0..<5 {
             observer.renderFrame(makeFrame())
         }
 
-        XCTAssertEqual(reports, 1, "only the first frame is news; the rest are the stream working")
+        XCTAssertEqual(reports.current, 1, "only the first frame is news; the rest are the stream working")
     }
 
     func testANilFrameIsNotAFrame() {
-        var reports = 0
-        let observer = VideoFrameObserver(onFirstFrame: { reports += 1 }, onSize: { _ in })
+        let reports = Counter()
+        let observer = VideoFrameObserver(onFirstFrame: { _ = reports.increment() }, onSize: { _ in })
 
         observer.renderFrame(nil)
 
-        XCTAssertEqual(reports, 0)
+        XCTAssertEqual(reports.current, 0)
         XCTAssertNil(observer.lastFrameAt)
     }
 
@@ -61,30 +61,30 @@ final class VideoFrameObserverTests: XCTestCase {
     /// frame has to count as a fresh arrival - otherwise nothing can ever restore `.playing` and a
     /// recovered stream is torn down while it is visibly working.
     func testResetReArmsFirstFrameReportingSoARecoveredStreamCanPlayAgain() {
-        var reports = 0
-        let observer = VideoFrameObserver(onFirstFrame: { reports += 1 }, onSize: { _ in })
+        let reports = Counter()
+        let observer = VideoFrameObserver(onFirstFrame: { _ = reports.increment() }, onSize: { _ in })
 
         observer.renderFrame(makeFrame())
-        XCTAssertEqual(reports, 1)
+        XCTAssertEqual(reports.current, 1)
 
         observer.reset()
         XCTAssertNil(observer.lastFrameAt, "reset also clears liveness, so the watchdog stands down")
 
         observer.renderFrame(makeFrame())
-        XCTAssertEqual(reports, 2, "a frame after reset must report again")
+        XCTAssertEqual(reports.current, 2, "a frame after reset must report again")
         XCTAssertNotNil(observer.lastFrameAt)
     }
 
     func testSizeIsForwardedAndDegenerateSizesIgnored() {
-        var sizes: [CGSize] = []
-        let observer = VideoFrameObserver(onFirstFrame: {}, onSize: { sizes.append($0) })
+        let sizes = LockedBox<[CGSize]>([])
+        let observer = VideoFrameObserver(onFirstFrame: {}, onSize: { size in sizes.current.append(size) })
 
         observer.setSize(CGSize(width: 0, height: 0))
         observer.setSize(CGSize(width: 1600, height: 0))
         observer.setSize(CGSize(width: 1600, height: 1200))
         observer.setSize(CGSize(width: 640, height: 480))
 
-        XCTAssertEqual(sizes, [CGSize(width: 1600, height: 1200), CGSize(width: 640, height: 480)],
+        XCTAssertEqual(sizes.current, [CGSize(width: 1600, height: 1200), CGSize(width: 640, height: 480)],
                        "a mid-stream resolution change is real news; a zero size is not")
     }
 }

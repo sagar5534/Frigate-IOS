@@ -21,7 +21,7 @@ final class LiveTransportTests: XCTestCase {
         )
         XCTAssertEqual(
             LiveStreamSource.ladder(camera: "front_door", config: config),
-            [.webrtc(streamName: "front_door_hi"), .mse(streamName: "front_door_hi"), .mjpeg(camera: "front_door")]
+            [.webrtc(streamName: "front_door_hi"), .mse(streamName: "front_door_hi"), .mjpeg(camera: "front_door", height: 720, fps: 5)]
         )
     }
 
@@ -34,7 +34,7 @@ final class LiveTransportTests: XCTestCase {
         )
         let ladder = LiveStreamSource.ladder(camera: "driveway", config: config)
         XCTAssertEqual(ladder.first, .webrtc(streamName: "drive_main"))
-        XCTAssertEqual(ladder.last, .mjpeg(camera: "driveway"))
+        XCTAssertEqual(ladder.last, .mjpeg(camera: "driveway", height: 720, fps: 5))
     }
 
     func testUnrestreamedCameraFallsToMJPEGOnly() throws {
@@ -42,7 +42,7 @@ final class LiveTransportTests: XCTestCase {
             cameras: #"{"attic": {"live": {"streams": {"Main": "attic"}}}}"#,
             go2rtcStreams: #"{"front_door": "rtsp://cam/live"}"#
         )
-        XCTAssertEqual(LiveStreamSource.ladder(camera: "attic", config: config), [.mjpeg(camera: "attic")])
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "attic", config: config), [.mjpeg(camera: "attic", height: 720, fps: 5)])
     }
 
     /// Frigate's own `verify_valid_live_stream_names` returns its ValueError instead of raising it,
@@ -53,7 +53,7 @@ final class LiveTransportTests: XCTestCase {
             cameras: #"{"front_door": {"live": {"streams": {"Main": "typo_stream"}}}}"#,
             go2rtcStreams: #"{"front_door": "rtsp://cam/live"}"#
         )
-        XCTAssertEqual(LiveStreamSource.ladder(camera: "front_door", config: config), [.mjpeg(camera: "front_door")])
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "front_door", config: config), [.mjpeg(camera: "front_door", height: 720, fps: 5)])
     }
 
     /// Older/partial payloads omit `live.streams` entirely; the server would have defaulted it to
@@ -205,6 +205,30 @@ final class LiveTransportTests: XCTestCase {
 
     func testUnknownCameraFallsToMJPEGRatherThanCrashing() throws {
         let config = try config(cameras: "{}", go2rtcStreams: #"{"front_door": "rtsp://cam/live"}"#)
-        XCTAssertEqual(LiveStreamSource.ladder(camera: "ghost", config: config), [.mjpeg(camera: "ghost")])
+        XCTAssertEqual(LiveStreamSource.ladder(camera: "ghost", config: config), [.mjpeg(camera: "ghost", height: 720, fps: 5)])
+    }
+
+    /// The MJPEG server encodes per connected client at whatever is asked. Asking above the detect
+    /// stream's own resolution or rate only upscales and duplicates - so the rung is clamped to
+    /// the camera's detect config where it is smaller, and capped where it is larger.
+    func testMJPEGRungClampsToTheDetectStream() throws {
+        let small = try config(
+            cameras: #"{"attic": {"detect": {"width": 640, "height": 360, "fps": 3}}}"#,
+            go2rtcStreams: "{}"
+        )
+        XCTAssertEqual(
+            LiveStreamSource.ladder(camera: "attic", config: small),
+            [.mjpeg(camera: "attic", height: 360, fps: 3)]
+        )
+
+        let large = try config(
+            cameras: #"{"attic": {"detect": {"width": 3840, "height": 2160, "fps": 15}}}"#,
+            go2rtcStreams: "{}"
+        )
+        XCTAssertEqual(
+            LiveStreamSource.ladder(camera: "attic", config: large),
+            [.mjpeg(camera: "attic", height: 720, fps: 5)],
+            "a phone screen doesn't benefit past 720p/5fps, and the server pays per client"
+        )
     }
 }

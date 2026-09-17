@@ -42,33 +42,37 @@ nonisolated enum LivePlayerState: Equatable, Sendable {
 }
 
 nonisolated enum LivePlayerError: Equatable, Sendable {
-    /// Couldn't reach or negotiate with go2rtc - an HTTP-shaped failure.
+    /// Couldn't reach or negotiate with the server - an HTTP-shaped failure.
     case signalingFailed
     /// Negotiated, but no candidate pair ever connected. Almost always port 8555 being unreachable
     /// from where the phone is. Its own case because it is the one failure with a specific,
-    /// explainable cause - and eventually what P4.2 keys its fallback off.
+    /// explainable cause - and what escalation to the MSE tier keys off.
     case iceFailed
     /// Connected, and then no video arrived. Distinct from `.iceFailed` because the advice is the
     /// opposite: the network is demonstrably fine and the camera or its stream is the problem.
     /// Telling someone to open port 8555 when the connection already succeeded sends them to
     /// reconfigure a router for nothing.
     case noVideo
+    /// Media arrived and this device could not play it - an unsupported codec, or a malformed
+    /// stream. Structural for the tier, like `.iceFailed`: the same bytes will fail the same way
+    /// on retry, so the useful response is a different tier, not another attempt.
+    case decodeFailed
     case connectionLost
     /// No tier in this build can play this camera.
     case notAvailable
 }
 
-/// Builds the best rung of a ladder that has an implementation **in this build**, skipping the
-/// rest. Returns `nil` when none do, which is not an error: the caller keeps showing the P2
-/// snapshot and reports live as unavailable.
+/// Builds the player for one rung of the ladder, or `nil` when this build has no implementation
+/// for that tier - which is not an error: the caller tries the next rung, and a camera with no
+/// buildable rung at all keeps its P2 snapshot with live reported unavailable.
 ///
-/// Adding a tier is one case here plus its `LivePlayer` conformer. Automatic *escalation* - falling
-/// to the next rung when a connected tier dies - is deliberately deferred until a second rung
-/// exists to escalate to (P4.2); the ladder being an ordered list is what keeps that additive.
+/// `LiveCameraModel` owns the walk down the ladder (both the initial pick and escalation when a
+/// tier fails); this type only answers "can this build play that transport?". Adding a tier is one
+/// case here plus its `LivePlayer` conformer.
 nonisolated struct LivePlayerFactory {
     /// Replaces the built-in tier construction. The seam exists so `LiveCameraModel`'s reconnect
-    /// policy can be driven against a scripted player - otherwise the only way to test a backoff
-    /// chain would be to break a real camera connection on a real server, repeatedly.
+    /// and escalation policies can be driven against scripted players - otherwise the only way to
+    /// test a backoff chain would be to break a real camera connection on a real server, repeatedly.
     typealias Build = @MainActor @Sendable (LiveTransport, FrigateClient) -> (any LivePlayer)?
 
     private let override: Build?
@@ -78,26 +82,19 @@ nonisolated struct LivePlayerFactory {
     }
 
     @MainActor
-    func makePlayer(for ladder: [LiveTransport], client: FrigateClient) -> (any LivePlayer)? {
-        let build = override ?? Self.buildImplementedTier
-        for transport in ladder {
-            if let player = build(transport, client) {
-                return player
-            }
-        }
-        return nil
+    func makePlayer(for transport: LiveTransport, client: FrigateClient) -> (any LivePlayer)? {
+        (override ?? Self.buildImplementedTier)(transport, client)
     }
 
-    /// One rung. `nil` means "this build has no implementation for that tier", not a failure.
     @MainActor
     private static func buildImplementedTier(_ transport: LiveTransport, _ client: FrigateClient) -> (any LivePlayer)? {
         switch transport {
         case .webrtc(let streamName):
             return WebRTCLivePlayer(streamName: streamName, client: client)
-        case .mse:
-            return nil  // P4.1: MSELivePlayer
-        case .mjpeg:
-            return nil  // P4.2: MJPEGLivePlayer
+        case .mse(let streamName):
+            return MSELivePlayer(streamName: streamName, client: client)
+        case .mjpeg(let camera, let height, let fps):
+            return MJPEGLivePlayer(camera: camera, height: height, fps: fps, client: client)
         }
     }
 }

@@ -55,12 +55,8 @@ final class WebRTCLivePlayer: LivePlayer {
     private var hasVideoFrames = false
     private var localCandidateCount = 0
     private var remoteCandidateCount = 0
-    private var frameWatchdog: Task<Void, Never>?
+    private let frameWatchdog = FrameLivenessWatchdog()
     private var statsProbe: Task<Void, Never>?
-    /// Longest gap between frames a live stream may have before it counts as stalled. Generous
-    /// enough for a low-frame-rate camera and a bad moment on wifi; short enough that a frozen
-    /// picture is caught before anyone trusts it.
-    private static let frameWatchdogInterval: Duration = .seconds(5)
 
     init(streamName: String, client: FrigateClient) {
         self.transport = .webrtc(streamName: streamName)
@@ -71,10 +67,10 @@ final class WebRTCLivePlayer: LivePlayer {
 
         self.frameObserver = VideoFrameObserver(
             onFirstFrame: { [weak self] in
-                Task { @MainActor in self?.markVideoFrameArrived() }
+                Task { @MainActor [weak self] in self?.markVideoFrameArrived() }
             },
             onSize: { [weak self] size in
-                Task { @MainActor in self?.videoSize = size }
+                Task { @MainActor [weak self] in self?.videoSize = size }
             }
         )
     }
@@ -101,8 +97,7 @@ final class WebRTCLivePlayer: LivePlayer {
         remoteCandidateCount = 0
         videoSize = nil
         frameObserver?.reset()
-        frameWatchdog?.cancel()
-        frameWatchdog = nil
+        frameWatchdog.cancel()
         statsProbe?.cancel()
         statsProbe = nil
 
@@ -185,7 +180,7 @@ final class WebRTCLivePlayer: LivePlayer {
             let signaling = WebRTCSignaling(channel: socket)
 
             let observer = PeerConnectionObserver { [weak self] track in
-                Task { @MainActor in self?.attachRenderers(to: track) }
+                Task { @MainActor [weak self] in self?.attachRenderers(to: track) }
             }
             self.observer = observer
 
@@ -413,26 +408,15 @@ final class WebRTCLivePlayer: LivePlayer {
     /// a camera that quietly stops sending leaves a frozen picture claiming `.playing` forever -
     /// the worst kind of failure, because it looks like success.
     private func startFrameWatchdog() {
-        frameWatchdog?.cancel()
-        frameWatchdog = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: Self.frameWatchdogInterval)
-                guard !Task.isCancelled, let self else { return }
-                guard let lastFrameAt = self.frameObserver?.lastFrameAt else {
-                    // `reset()` cleared liveness, so this watchdog is for a stream that no longer
-                    // exists. Whoever reset it owns starting the next one.
-                    self.frameWatchdog = nil
-                    return
-                }
-                if ContinuousClock.now - lastFrameAt > Self.frameWatchdogInterval {
-                    LiveLog.logger.info("frames stopped src=\(self.streamName, privacy: .public)")
-                    self.frameWatchdog = nil
-                    self.forgetVideoFrames()
-                    self.transition(to: .stalled)
-                    return
-                }
+        frameWatchdog.start(
+            lastFrameAt: { [weak self] in self?.frameObserver?.lastFrameAt },
+            onStall: { [weak self] in
+                guard let self else { return }
+                LiveLog.logger.info("frames stopped src=\(self.streamName, privacy: .public)")
+                self.forgetVideoFrames()
+                self.transition(to: .stalled)
             }
-        }
+        )
     }
 
     /// Only claim `.playing` once the connection is up *and* a frame has actually arrived. Until

@@ -2,18 +2,23 @@ import Foundation
 
 /// One way of watching a camera live.
 ///
-/// All three tiers are enumerated from the start even though only `.webrtc` has an implementation
-/// today (P4). `.mse` (P4.1) and `.mjpeg` (P4.2) each land later as one more `LivePlayer` conformer
-/// plus one case in `LivePlayerFactory`, with no call-site changes. See `docs/DECISIONS.md`
-/// ADR-012 for why Frigate offers no live HLS and why the ladder is ordered this way.
+/// All three tiers of the ladder (ADR-012): each is one `LivePlayer` conformer plus one case in
+/// `LivePlayerFactory`, and `LiveCameraModel` walks down the ladder when a tier fails.
 nonisolated enum LiveTransport: Equatable, Sendable {
     /// go2rtc WebRTC. Sub-second, but its media rides port 8555 rather than the HTTPS origin.
     /// `streamName` is the **go2rtc stream name**, which is not always the camera name.
     case webrtc(streamName: String)
-    /// go2rtc MSE (fMP4 over WebSocket) - real video over the same authenticated origin. **P4.1.**
+    /// go2rtc MSE (fMP4 over WebSocket): real H.264/H.265 at ~1-2s over the same authenticated
+    /// HTTPS origin, so it works where WebRTC's port-8555 media path can't cross. **P4.1.**
     case mse(streamName: String)
-    /// Frigate's own MJPEG feed off the low-res detect stream. Works anywhere. **P4.2.**
-    case mjpeg(camera: String)
+    /// Frigate's own MJPEG feed off the low-res detect stream. Works anywhere, for every camera -
+    /// including ones with no go2rtc restream at all. **P4.2.**
+    ///
+    /// `height`/`fps` ride along because the server re-encodes JPEGs *per connected client* at
+    /// whatever is asked: values above the detect stream's own resolution or rate buy nothing and
+    /// cost real server CPU, so they are clamped to the camera's detect config where the config is
+    /// at hand - at ladder-resolution time, not in the player.
+    case mjpeg(camera: String, height: Int, fps: Int)
 }
 
 /// Answers the one question "how do I watch this camera?", as pure functions over the config.
@@ -26,14 +31,27 @@ nonisolated enum LiveStreamSource {
     /// MJPEG, which is why P4.2 is what finally makes live view work for every camera rather than
     /// most.
     static func ladder(camera: String, config: FrigateConfig) -> [LiveTransport] {
+        let mjpeg = mjpegRung(camera: camera, config: config)
         guard let streamName = restreamedStreamName(camera: camera, config: config) else {
-            return [.mjpeg(camera: camera)]
+            return [mjpeg]
         }
         return [
             .webrtc(streamName: streamName),
             .mse(streamName: streamName),
-            .mjpeg(camera: camera),
+            mjpeg,
         ]
+    }
+
+    /// MJPEG frames come from the detect stream, so asking for more height or rate than detect has
+    /// only makes the server upscale and duplicate - per connected client. Clamp to the detect
+    /// config, capped at what a phone screen meaningfully shows.
+    private static func mjpegRung(camera: String, config: FrigateConfig) -> LiveTransport {
+        let detect = config.cameras[camera]?.detect ?? .init()
+        return .mjpeg(
+            camera: camera,
+            height: min(detect.height ?? 720, 720),
+            fps: min(detect.fps, 5)
+        )
     }
 
     /// The go2rtc stream backing this camera, or `nil` when it isn't restreamed.
