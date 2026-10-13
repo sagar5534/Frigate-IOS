@@ -7,9 +7,10 @@ struct EventFilters: Equatable {
     var cameras: Set<String> = []
     var labels: Set<String> = []
     var severity: ReviewSegment.Severity?
-    var timeRange: TimeRange = .last24Hours
+    var timeRange: TimeRange = .allHistory
 
     enum TimeRange: String, CaseIterable, Identifiable, Equatable {
+        case allHistory = "All History"
         case last24Hours = "Last 24 Hours"
         case today = "Today"
         case last7Days = "Last 7 Days"
@@ -22,6 +23,10 @@ struct EventFilters: Equatable {
         func bounds(now: Date = Date()) -> (after: Double, before: Double) {
             let before = now.timeIntervalSince1970
             switch self {
+            case .allHistory:
+                // Frigate uses `params.after or nowMinus24Hours`, so zero silently
+                // becomes its 24-hour default. One second is still before any event.
+                return (1, before)
             case .last24Hours:
                 return (before - 24 * 3600, before)
             case .today:

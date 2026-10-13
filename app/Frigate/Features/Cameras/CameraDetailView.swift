@@ -43,7 +43,7 @@ struct CameraDetailView: View {
 
                 Spacer(minLength: 24)
 
-                cameraStrip(availableWidth: proxy.size.width)
+                cameraStrip
                     .padding(.bottom, 18)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -150,7 +150,7 @@ struct CameraDetailView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func cameraStrip(availableWidth: CGFloat) -> some View {
+    private var cameraStrip: some View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 12) {
                 ForEach(model.cameraNames, id: \.self) { cameraName in
@@ -170,7 +170,7 @@ struct CameraDetailView: View {
         .scrollIndicators(.hidden)
         .scrollTargetBehavior(.viewAligned)
         .scrollPosition(id: $centeredCameraName, anchor: .center)
-        .frame(height: min(104, max(78, availableWidth * 0.24)))
+        .frame(height: 86)
         .onChange(of: model.selectedCameraName) { _, selected in
             withAnimation(reduceMotion ? nil : .snappy) {
                 centeredCameraName = selected
@@ -195,12 +195,11 @@ private struct CameraThumbnailButton: View {
     var body: some View {
         Button(action: action) {
             SnapshotImage(state: state)
-                .aspectRatio(16.0 / 9.0, contentMode: .fill)
-                .frame(width: 142)
+                .frame(width: 142, height: 80)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(isSelected ? Color.white : Color.white.opacity(0.14), lineWidth: isSelected ? 4 : 1)
+                        .strokeBorder(isSelected ? Color.white : Color.white.opacity(0.14), lineWidth: isSelected ? 4 : 1)
                 }
                 .padding(3)
                 .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))

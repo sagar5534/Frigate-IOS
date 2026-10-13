@@ -37,7 +37,7 @@ struct EventsView: View {
                         systemImage: "list.bullet.rectangle",
                         description: Text(
                             model.filters.isDefault
-                                ? "Activity from the last 24 hours will appear here."
+                                ? "Activity will appear here when Frigate detects something."
                                 : "No activity matches your filters."
                         )
                     )
@@ -54,23 +54,22 @@ struct EventsView: View {
                                         }
                                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                                         .listRowSeparator(.hidden)
-                                        .onAppear {
-                                            guard segment.id == segments.last?.id else { return }
-                                            Task { await model.loadMore() }
-                                        }
                                     }
                                 }
                             } header: {
                                 dayHeader(section.day)
                             }
                         }
-                        if model.isLoadingMore {
+                        if model.hasMorePages {
                             HStack {
                                 Spacer()
                                 ProgressView()
+                                    .opacity(model.isLoadingMore ? 1 : 0)
                                 Spacer()
                             }
                             .listRowSeparator(.hidden)
+                            .id(segments.last?.id)
+                            .onAppear { Task { await model.loadMore() } }
                         }
                     }
                     .listStyle(.plain)

@@ -6,6 +6,13 @@ final class EventFiltersTests: XCTestCase {
 
     func testDefaultFiltersIsDefault() {
         XCTAssertTrue(EventFilters().isDefault)
+        XCTAssertEqual(EventFilters().timeRange, .allHistory)
+    }
+
+    func testAllHistoryBounds() {
+        let bounds = EventFilters.TimeRange.allHistory.bounds(now: now)
+        XCTAssertEqual(bounds.before, now.timeIntervalSince1970)
+        XCTAssertEqual(bounds.after, 1)
     }
 
     func testNonDefaultFiltersIsNotDefault() {

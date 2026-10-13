@@ -19,11 +19,9 @@ final class EventsModel {
 
     private let client: FrigateClient
     private let pageSize = 100
-    /// Rolling lower bound subtracted from the oldest loaded segment for each "load older" page.
-    /// A fixed page size alone isn't enough to page back through time: the server re-defaults a
-    /// missing `after` to "24h before now", so every page's `after` must be sent explicitly too
-    /// (see `docs/plans/P3-events-timeline.md`).
-    private let pageWindow: TimeInterval = 7 * 24 * 3600
+    /// The selected range's lower bound stays fixed while `before` moves back through pages.
+    /// Frigate defaults an omitted `after` to 24 hours ago, so it must be sent on every page.
+    private var paginationAfter: Double = 1
 
     init(client: FrigateClient) {
         self.client = client
@@ -40,6 +38,7 @@ final class EventsModel {
         }
         hasMorePages = true
         let bounds = filters.timeRange.bounds()
+        paginationAfter = bounds.after
         do {
             let segments = try await client.fetchReviews(
                 cameras: Array(filters.cameras),
@@ -58,9 +57,9 @@ final class EventsModel {
         }
     }
 
-    /// Fetches an older page beyond what's currently loaded and appends it. Call when the last
-    /// row scrolls into view. No-ops while already loading, before the first page has loaded, or
-    /// once a page has come back with nothing new (no more history worth fetching).
+    /// Fetches an older page beyond what's currently loaded and appends it. Call when the footer
+    /// after the day sections scrolls into view. No-ops while already loading, before the first
+    /// page has loaded, or once a page has come back with nothing new.
     func loadMore() async {
         guard case .loaded(let segments) = state,
               let oldest = segments.map(\.startTime).min(),
@@ -76,14 +75,13 @@ final class EventsModel {
         defer { isLoadingMore = false }
 
         let before = oldest
-        let after = before - pageWindow
         do {
             let page = try await client.fetchReviews(
                 cameras: Array(requestedFilters.cameras),
                 labels: Array(requestedFilters.labels),
                 severity: requestedFilters.severity,
                 before: before,
-                after: after,
+                after: paginationAfter,
                 limit: pageSize
             )
             guard filters == requestedFilters, case .loaded(var current) = state else { return }

@@ -71,7 +71,7 @@ final class EventsModelTests: XCTestCase {
         await model.load()
 
         XCTAssertNotNil(capturedQuery.current["before"])
-        XCTAssertNotNil(capturedQuery.current["after"])
+        XCTAssertEqual(capturedQuery.current["after"], "1.0")
     }
 
     @MainActor
@@ -163,6 +163,35 @@ final class EventsModelTests: XCTestCase {
     // MARK: loadMore
 
     @MainActor
+    func testAllHistoryLoadsAnEventOlderThanTheServersDefault24HourWindow() async {
+        let now = Date().timeIntervalSince1970
+        let firstPage = fullPageJSON(idPrefix: "recent", startingAt: now - 1_000)
+        let olderPage = Data("[\(segmentJSON(id: "older", startTime: now - 2 * 86_400))]".utf8)
+        let requestCount = Counter()
+        MockURLProtocol.requestHandler = { request in
+            _ = requestCount.increment()
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let values = Dictionary(uniqueKeysWithValues: query.map { ($0.name, $0.value ?? "") })
+            let before = Double(values["before"] ?? "") ?? 0
+            let after = Double(values["after"] ?? "") ?? 0
+            // Frigate evaluates `params.after or nowMinus24Hours`. A zero lower bound
+            // loses the older event even though it is present on the server.
+            let body = before < now - 500 && after > 0 ? olderPage : firstPage
+            return (self.httpResponse(request.url!, 200), body)
+        }
+
+        let model = EventsModel(client: makeClient())
+        await model.load()
+        await model.loadMore()
+
+        guard case .loaded(let segments) = model.state else {
+            return XCTFail("expected .loaded")
+        }
+        XCTAssertEqual(requestCount.current, 2)
+        XCTAssertEqual(segments.last?.id, "older")
+    }
+
+    @MainActor
     func testLoadMoreAppendsOlderSegmentsAndKeepsNewestFirstOrder() async {
         let firstPage = fullPageJSON(idPrefix: "p", startingAt: 300) // times 300...399
         let olderPage = Data("[\(segmentJSON(id: "older", startTime: 100))]".utf8)
@@ -205,7 +234,7 @@ final class EventsModelTests: XCTestCase {
         await model.loadMore()
 
         XCTAssertEqual(capturedQuery.current["before"], "300.0")
-        XCTAssertNotNil(capturedQuery.current["after"])
+        XCTAssertEqual(capturedQuery.current["after"], "1.0")
     }
 
     @MainActor
