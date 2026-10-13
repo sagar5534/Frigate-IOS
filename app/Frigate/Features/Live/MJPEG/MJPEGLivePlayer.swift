@@ -13,6 +13,8 @@ import UIKit
 @MainActor
 final class MJPEGLivePlayer: LivePlayer {
     let transport: LiveTransport
+    let supportsAudio = false
+    private(set) var isMuted = true
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
     var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
 
@@ -55,9 +57,9 @@ final class MJPEGLivePlayer: LivePlayer {
         self.fps = fps
         self.client = client
         self.imageView = UIImageView()
-        // Matches the other tiers' surfaces, and an empty UIImageView is transparent, so the
-        // snapshot underneath keeps showing through until the first frame lands.
-        imageView.contentMode = .scaleAspectFill
+        // Match the other tiers: show the whole frame regardless of camera aspect ratio.
+        // An empty UIImageView remains transparent until the first frame lands.
+        imageView.contentMode = .scaleAspectFit
         imageView.clipsToBounds = true
     }
 
@@ -72,6 +74,10 @@ final class MJPEGLivePlayer: LivePlayer {
         let epoch = connectionEpoch
         state = .connecting
         streamTask = Task { await self.run(epoch: epoch) }
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
     }
 
     func stop() {

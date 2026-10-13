@@ -9,6 +9,8 @@ import SwiftUI
 @MainActor
 final class FakeLivePlayer: LivePlayer {
     let transport: LiveTransport
+    let supportsAudio: Bool
+    private(set) var isMuted = true
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
     var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
 
@@ -29,8 +31,12 @@ final class FakeLivePlayer: LivePlayer {
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
-    init(transport: LiveTransport = .webrtc(streamName: "cam1")) {
+    init(
+        transport: LiveTransport = .webrtc(streamName: "cam1"),
+        supportsAudio: Bool = true
+    ) {
         self.transport = transport
+        self.supportsAudio = supportsAudio
     }
 
     var view: AnyView { AnyView(EmptyView()) }
@@ -43,6 +49,10 @@ final class FakeLivePlayer: LivePlayer {
     func stop() {
         stopCount += 1
         state = .idle
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
     }
 
     /// Push a transition as the real transport would have.

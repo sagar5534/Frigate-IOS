@@ -54,8 +54,10 @@ every post-login request 401'd (see LEARNINGS.md). Sign-in now works end-to-end.
 - [x] App shell / navigation (Cameras, Events) - `MainTabView` (Cameras/Events/Settings tabs) replaces the P1 `MainPlaceholderView`
 - [x] Fetch `/api/config`, parse camera list - `FrigateConfig.CameraConfig.enabled` + `enabledCameraNames`; verified field shapes against a real server (frigate.sagarp.ca)
 - [x] Camera list of snapshot rows - `CameraListView`/`CameraGridModel`, `GET /api/{camera}/latest.jpg?height=N`. Reworked from a grid to a full-width, free-scrolling list (one camera per row) with a bottom-right "x ago"/"Now" freshness badge (`SnapshotAgeBadge`), Apple Home-style
-- [x] Auto-refresh snapshots every few seconds - `CameraGridModel.startAutoRefresh()` (5s loop, cancelled on disappear)
-- [x] Tap camera to open a larger snapshot / detail view - `CameraDetailView`/`CameraDetailModel` (720p, own refresh loop)
+- [x] Auto-refresh snapshots every few seconds - one shared `CameraGridModel` 5s loop serves the
+  list and viewer, paused when the Cameras feature is hidden or the app backgrounds
+- [x] Tap camera to open a larger snapshot / detail view - now superseded by the full-screen
+  single-page camera viewer below
 - [x] Minimal Settings: server info, connection status, log out - `SettingsView`
 
 _Milestone: see all your cameras, updating._
@@ -213,7 +215,22 @@ _Milestone: feature parity with the PWA._
   they skip without `TEST_RUNNER_FRIGATE_TEST_*` credentials, and no session with credentials has
   run them yet. They are the check that go2rtc's actual fMP4 matches what `FMP4Demuxer` accepts
   and that the MJPEG boundary parsing holds against real traffic
+
 - **P4.1/P4.2, not yet done:** an end-to-end escalation pass in the app - block port 8555 (or use
   a network that does) and watch a camera land on MSE; disable a camera's restream and confirm
   MJPEG plays; check MSE's live-edge latency and the decode-session budget with the Recent
   Activity strip on screen
+
+## Camera viewer redesign
+- [x] Replace the pushed detail screen with a full-screen, single-page camera viewer
+- [x] Add the custom close/title/mute header and horizontally scrolling camera switcher
+- [x] Preserve single-player lifecycle, snapshot fallback, reconnect, and background teardown
+- [x] Add WebRTC receive-audio support and an honest unavailable state on video-only transports
+- [x] Use an output-only WebRTC audio device so receive-only camera audio does not access the mic
+- [x] Share the list's snapshot store with the viewer and keep one refresh loop across presentation
+- [x] Fit live frames from every transport without cropping non-16:9 cameras
+- [x] Add regression tests and pass the full simulator suite
+
+_Milestone: tapping any camera opens one full-screen viewer, switching cameras never overlaps live
+players, audio begins muted, and the doorbell's full frame is visible on device. The full simulator
+suite passes with parallel testing disabled._

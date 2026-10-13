@@ -19,6 +19,8 @@ final class MSELivePlayer: LivePlayer {
     typealias MakeChannel = @Sendable (FrigateClient, String) async throws -> any MediaChannel
 
     let transport: LiveTransport
+    let supportsAudio = false
+    private(set) var isMuted = true
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
     var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
 
@@ -104,6 +106,10 @@ final class MSELivePlayer: LivePlayer {
         state = .connecting
         observeRendererFailure()
         tasks.append(Task { await self.connect(epoch: epoch) })
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
     }
 
     func stop() {

@@ -5,15 +5,17 @@ import WebRTC
 /// The WebRTC rung of the live-view ladder (P4): go2rtc signaling over an authenticated WebSocket,
 /// media over a peer connection, rendered by `RTCMTLVideoView`.
 ///
-/// Sub-second latency, hardware decode, and audio available later - at the cost of a media path
+/// Sub-second latency, hardware decode, and optional receive audio - at the cost of a media path
 /// that does not use the HTTPS origin everything else in this app rides. When that path is blocked
 /// this player fails with `.iceFailed`, and until P4.1/P4.2 land there is no lower rung to fall to,
 /// so saying *why* is the whole recovery story. See `docs/DECISIONS.md` ADR-012.
 @MainActor
 final class WebRTCLivePlayer: LivePlayer {
     let transport: LiveTransport
+    let supportsAudio = true
     var onStateChange: (@MainActor (LivePlayerState) -> Void)?
     var onVideoSizeChange: (@MainActor (CGSize) -> Void)?
+    private(set) var isMuted = true
 
     private(set) var videoSize: CGSize? {
         didSet {
@@ -40,6 +42,7 @@ final class WebRTCLivePlayer: LivePlayer {
     /// `add(_:)`, and unregisters them when it deallocates. Attaching to a track you don't hold
     /// compiles, runs, logs nothing, and silently delivers no frames - see `LEARNINGS.md`.
     private var videoTrack: RTCVideoTrack?
+    private var audioTrack: RTCAudioTrack?
     private var socket: LiveSocket?
     private var tasks: [Task<Void, Never>] = []
     private var isStarted = false
@@ -63,7 +66,7 @@ final class WebRTCLivePlayer: LivePlayer {
         self.streamName = streamName
         self.client = client
         self.renderer = RTCMTLVideoView()
-        renderer.videoContentMode = .scaleAspectFill
+        renderer.videoContentMode = .scaleAspectFit
 
         self.frameObserver = VideoFrameObserver(
             onFirstFrame: { [weak self] in
@@ -118,6 +121,7 @@ final class WebRTCLivePlayer: LivePlayer {
             }
             self.videoTrack = nil
         }
+        audioTrack = nil
 
         peerConnection?.close()
         peerConnection = nil
@@ -128,6 +132,11 @@ final class WebRTCLivePlayer: LivePlayer {
         }
 
         state = .idle
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
+        audioTrack?.isEnabled = !muted
     }
 
     /// Every transition after `start()` goes through here. `stop()` cancels the connect task, but
@@ -179,9 +188,18 @@ final class WebRTCLivePlayer: LivePlayer {
             self.socket = socket
             let signaling = WebRTCSignaling(channel: socket)
 
-            let observer = PeerConnectionObserver { [weak self] track in
-                Task { @MainActor [weak self] in self?.attachRenderers(to: track) }
-            }
+            let observer = PeerConnectionObserver(
+                onVideoTrack: { [weak self] track in
+                    Task { @MainActor [weak self] in self?.attachRenderers(to: track) }
+                },
+                onAudioTrack: { [weak self] track in
+                    // Silence the track on libwebrtc's callback thread before handing it to the
+                    // main actor. Without this, a muted-by-default viewer could leak a short burst
+                    // of audio between receiver creation and the asynchronous handoff.
+                    track.isEnabled = false
+                    Task { @MainActor [weak self] in self?.attachAudio(track) }
+                }
+            )
             self.observer = observer
 
             guard let peerConnection = Self.factory.peerConnection(
@@ -194,13 +212,17 @@ final class WebRTCLivePlayer: LivePlayer {
             }
             self.peerConnection = peerConnection
 
-            // Video only. Audio is out of P4's scope, and *asking* for it invites a class of
-            // negotiation failure against cameras with no audio or an odd codec - for a track we
-            // would discard. Adding it later is this one transceiver.
-            let transceiverInit = RTCRtpTransceiverInit()
-            transceiverInit.direction = .recvOnly
-            let transceiver = peerConnection.addTransceiver(of: .video, init: transceiverInit)
+            let videoTransceiverInit = RTCRtpTransceiverInit()
+            videoTransceiverInit.direction = .recvOnly
+            let transceiver = peerConnection.addTransceiver(of: .video, init: videoTransceiverInit)
             LiveLog.logger.info("transceiver=\(transceiver != nil, privacy: .public) track=\(String(describing: transceiver?.receiver.track?.kind), privacy: .public)")
+
+            // Audio is optional at the source. A recv-only transceiver is safe when a camera has
+            // no audio: go2rtc can reject or leave the m-line inactive while video continues.
+            // Playback begins muted, and a remote track is enabled only after the user asks for it.
+            let audioTransceiverInit = RTCRtpTransceiverInit()
+            audioTransceiverInit.direction = .recvOnly
+            _ = peerConnection.addTransceiver(of: .audio, init: audioTransceiverInit)
 
             // Under Unified Plan a `recvonly` transceiver's receiver already has its track, so the
             // renderer can be attached now rather than waiting on a delegate callback. Same thing
@@ -364,6 +386,12 @@ final class WebRTCLivePlayer: LivePlayer {
         }
     }
 
+    private func attachAudio(_ track: RTCAudioTrack) {
+        LiveLog.logger.info("remote audio track attached src=\(self.streamName, privacy: .public)")
+        audioTrack = track
+        track.isEnabled = !isMuted
+    }
+
     /// Is media actually arriving, and is anything decoding it?
     ///
     /// Worth its keep: this line is what separated "the media path is blocked" from "the media path
@@ -435,7 +463,8 @@ final class WebRTCLivePlayer: LivePlayer {
         RTCInitializeSSL()
         return RTCPeerConnectionFactory(
             encoderFactory: RTCDefaultVideoEncoderFactory(),
-            decoderFactory: RTCDefaultVideoDecoderFactory()
+            decoderFactory: RTCDefaultVideoDecoderFactory(),
+            audioDevice: PlaybackAudioDevice()
         )
     }()
 

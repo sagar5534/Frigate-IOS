@@ -13,7 +13,13 @@ struct LiveCameraView: View {
 
     var body: some View {
         ZStack {
-            SnapshotImage(state: snapshot)
+            SnapshotImage(state: snapshot, contentMode: .fit)
+
+            // Aspect-fit video can leave letterbox space. Once live frames arrive, keep that
+            // space black instead of revealing pieces of the older snapshot behind the player.
+            if live.isPlaying {
+                Color.black
+            }
 
             if let player = live.player {
                 player.view
@@ -22,52 +28,28 @@ struct LiveCameraView: View {
             LiveStatusOverlay(
                 state: live.state,
                 isAwaitingManualRetry: live.isAwaitingManualRetry,
-                hasEverPlayed: live.hasEverPlayed,
                 retry: live.retry
             )
         }
     }
 }
 
-/// What the live layer has to say for itself. Silent while playing, and silent when live simply
-/// isn't available - in that case the snapshot below is the whole feature, and an error badge over
-/// a perfectly good picture would be noise.
+/// Keep the picture free of transient loading badges. The viewer header owns connection progress;
+/// this overlay only presents failures that need the user's attention.
 struct LiveStatusOverlay: View {
     let state: LivePlayerState
     /// Whether the failure is the user's to act on, or one the model is already retrying.
     let isAwaitingManualRetry: Bool
-    /// Whether video has played at all yet. Only the wording depends on it, but the wording matters:
-    /// a first connection that pauses is still connecting, and calling that "Reconnecting" tells
-    /// the user something dropped when nothing ever started.
-    let hasEverPlayed: Bool
     let retry: () -> Void
 
     var body: some View {
         switch state {
-        case .playing, .idle:
-            EmptyView()
-        case .connecting:
-            badge { ProgressView().controlSize(.small) ; Text("Connecting") }
-        case .stalled:
-            // `.stalled` covers both "connected, waiting for the first frame" and "was playing and
-            // went quiet". They look the same to the state machine and read very differently to a
-            // person.
-            badge {
-                ProgressView().controlSize(.small)
-                Text(hasEverPlayed ? "Reconnecting" : "Connecting")
-            }
         case .failed(let error):
-            // A failure with a retry already scheduled is a transient blip, not something to
-            // interrupt anyone about. Showing the full explanation card during backoff would flash
-            // "Try Again" at the user five times over half a minute before it was ever true.
             if isAwaitingManualRetry {
                 failure(error)
-            } else {
-                badge {
-                    ProgressView().controlSize(.small)
-                    Text(hasEverPlayed ? "Reconnecting" : "Connecting")
-                }
             }
+        case .playing, .idle, .connecting, .stalled:
+            EmptyView()
         }
     }
 
@@ -134,13 +116,4 @@ struct LiveStatusOverlay: View {
         .padding(16)
     }
 
-    private func badge<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 6, content: content)
-            .font(.caption)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.regularMaterial, in: Capsule())
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(12)
-    }
 }

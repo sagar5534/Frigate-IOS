@@ -17,9 +17,9 @@ final class SampleBufferDisplayView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        // Matches RTCMTLVideoView's `.scaleAspectFill`, so a WebRTC -> MSE escalation doesn't
-        // visibly reframe the picture.
-        displayLayer.videoGravity = .resizeAspectFill
+        // Keep the entire frame visible across transport changes, including portrait and 4:3
+        // cameras whose edges would be cropped by aspect fill.
+        displayLayer.videoGravity = .resizeAspect
     }
 
     required init?(coder: NSCoder) {

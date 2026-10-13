@@ -15,6 +15,13 @@ protocol LivePlayer: AnyObject {
     /// stream rather than assuming 16:9. A property of the media, not of any rendering technology,
     /// so every tier can answer it.
     var videoSize: CGSize? { get }
+    /// Whether this transport can receive camera audio. MJPEG has no audio channel, and the
+    /// current MSE demuxer is deliberately video-only, so callers must not present a working mute
+    /// control merely because a player exists.
+    var supportsAudio: Bool { get }
+    /// The requested playback state. Players default to muted so opening a camera never starts
+    /// sound unexpectedly.
+    var isMuted: Bool { get }
     /// Called whenever `videoSize` changes, including a mid-stream resolution switch. A push
     /// channel rather than something to poll, for the same reason as `onStateChange`: players are
     /// not `@Observable`, so nothing downstream would ever notice a change on its own.
@@ -26,6 +33,9 @@ protocol LivePlayer: AnyObject {
     func start()
     /// Full teardown. Safe to call twice, and safe to call before `start()`.
     func stop()
+    /// Applies immediately when an audio track exists and is remembered for tracks that arrive
+    /// later in the connection handshake.
+    func setMuted(_ muted: Bool)
     var view: AnyView { get }
 }
 

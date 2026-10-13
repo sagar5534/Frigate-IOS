@@ -101,6 +101,17 @@ final class WebRTCLivePlayerTests: XCTestCase {
 
         XCTAssertEqual(player.state, .idle)
         XCTAssertEqual(player.transport, .webrtc(streamName: "front_door_hi"))
+        XCTAssertTrue(player.supportsAudio)
+        XCTAssertTrue(player.isMuted)
+    }
+
+    func testMutePreferenceCanBeChangedBeforeAudioTrackArrives() {
+        let player = WebRTCLivePlayer(streamName: "front_door_hi", client: makeClient())
+        self.player = player
+
+        player.setMuted(false)
+
+        XCTAssertFalse(player.isMuted)
     }
 
     /// `LivePlayer.stop()` promises it is safe before `start()` and safe twice over. A teardown path

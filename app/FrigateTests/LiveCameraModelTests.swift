@@ -107,6 +107,21 @@ final class LiveCameraModelTests: XCTestCase {
         model.stop()
     }
 
+    func testPlayerStartsMutedAndMuteChangesReachIt() async throws {
+        let player = FakeLivePlayer()
+        let model = makeModel(config: try makeConfig(), player: player)
+
+        model.start()
+        XCTAssertTrue(model.isMuted)
+        XCTAssertTrue(player.isMuted)
+        XCTAssertTrue(model.supportsAudio)
+
+        model.setMuted(false)
+        XCTAssertFalse(model.isMuted)
+        XCTAssertFalse(player.isMuted)
+        model.stop()
+    }
+
     // MARK: Playing
 
     func testPlayingPropagatesAndIsWhatTheSnapshotPollWatches() async throws {

@@ -12,6 +12,7 @@ import OSLog
 final class LiveCameraModel {
     private(set) var state: LivePlayerState = .idle
     private(set) var player: (any LivePlayer)?
+    private(set) var isMuted = true
 
     let cameraName: String
 
@@ -69,6 +70,10 @@ final class LiveCameraModel {
         state == .playing
     }
 
+    var supportsAudio: Bool {
+        player?.supportsAudio == true
+    }
+
     /// The stream's aspect ratio once known, so a fullscreen container can be shaped to the video
     /// instead of cropping it to whatever shape the screen happens to be.
     ///
@@ -124,6 +129,7 @@ final class LiveCameraModel {
             self?.videoAspectRatio = size.height > 0 ? size.width / size.height : nil
         }
         self.player = player
+        player.setMuted(isMuted)
         state = .connecting
         player.start()
         startDeadline(policy.startupDeadline, reason: Self.startupFailure(for: player.transport))
@@ -162,6 +168,11 @@ final class LiveCameraModel {
     func retry() {
         stop()
         start()
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
+        player?.setMuted(muted)
     }
 
     // MARK: Policy

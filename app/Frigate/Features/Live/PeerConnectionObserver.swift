@@ -29,12 +29,17 @@ nonisolated final class PeerConnectionObserver: NSObject, RTCPeerConnectionDeleg
     /// Not routed through `events`: `RTCVideoTrack` is a non-`Sendable` reference type, and this is
     /// a one-shot handoff where ordering against the state transitions doesn't matter.
     private let onVideoTrack: @Sendable (RTCVideoTrack) -> Void
+    private let onAudioTrack: @Sendable (RTCAudioTrack) -> Void
 
-    init(onVideoTrack: @escaping @Sendable (RTCVideoTrack) -> Void) {
+    init(
+        onVideoTrack: @escaping @Sendable (RTCVideoTrack) -> Void,
+        onAudioTrack: @escaping @Sendable (RTCAudioTrack) -> Void = { _ in }
+    ) {
         let (events, continuation) = AsyncStream<PeerConnectionEvent>.makeStream()
         self.events = events
         self.continuation = continuation
         self.onVideoTrack = onVideoTrack
+        self.onAudioTrack = onAudioTrack
         super.init()
     }
 
@@ -47,8 +52,11 @@ nonisolated final class PeerConnectionObserver: NSObject, RTCPeerConnectionDeleg
         didAdd rtpReceiver: RTCRtpReceiver,
         streams mediaStreams: [RTCMediaStream]
     ) {
-        guard let track = rtpReceiver.track as? RTCVideoTrack else { return }
-        onVideoTrack(track)
+        if let track = rtpReceiver.track as? RTCVideoTrack {
+            onVideoTrack(track)
+        } else if let track = rtpReceiver.track as? RTCAudioTrack {
+            onAudioTrack(track)
+        }
     }
 
     /// Ends the event stream so the player's consuming loop exits. Called during teardown, before
