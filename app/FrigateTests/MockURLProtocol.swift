@@ -58,4 +58,26 @@ final class Counter: @unchecked Sendable {
         value += 1
         return value
     }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+/// Thread-safe mutable box for values a `@Sendable` request handler must read while the test
+/// mutates them between requests - a `var` captured there is a Swift 6 error.
+final class LockedBox<Value>: @unchecked Sendable {
+    private var value: Value
+    private let lock = NSLock()
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    var current: Value {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
 }

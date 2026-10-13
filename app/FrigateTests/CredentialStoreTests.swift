@@ -70,7 +70,7 @@ final class CredentialStoreTests: XCTestCase {
         defer { try? store.clear() }
 
         XCTAssertNil(try store.token())
-        try await store.saveToken("jwt-abc")
+        try store.saveToken("jwt-abc")
         XCTAssertEqual(try store.token(), "jwt-abc")
     }
 

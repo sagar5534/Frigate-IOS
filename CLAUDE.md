@@ -46,9 +46,10 @@ xcodebuild -project app/Frigate.xcodeproj -scheme Frigate \
 
 Do not casually reverse these (reasoning in `docs/DECISIONS.md`):
 
-- **Live view behind a thin `LivePlayer` interface.** Ship `HLSPlayer` (native AVPlayer) only
-  for v1; `WebRTCPlayer` slots in later as a drop-in. Never WebRTC a grid - low-res HLS for the
-  grid, one WebRTC peer only for the focused camera.
+- **Live view behind a thin `LivePlayer` interface.** Frigate exposes **no live HLS** at all
+  (ADR-012) - the tier ladder is **WebRTC (P4) -> MSE (P4.1) -> MJPEG (P4.2)**, each its own
+  phase and each a drop-in conformer behind the same seam. Never live-stream a grid: the camera
+  list stays on the P2 snapshot loop, and one live player runs only for the focused camera.
 - **Relay owns push credentials** - users never touch APNs/FCM. Prefer FCM topics (app
   self-subscribes; no device-token registry).
 - **Config lives in the app UI, not YAML.** No notifier config file for users to edit; toggles

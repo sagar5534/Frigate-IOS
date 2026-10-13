@@ -68,9 +68,9 @@ final class CameraGridModelTests: XCTestCase {
     @MainActor
     func testRefreshAllAdvancesCapturedAtWhenBytesChange() async {
         let secondJpegBytes = Data([0xFF, 0xD8, 0x00, 0xD9])
-        var responseBytes = jpegBytes
+        let responseBytes = LockedBox(jpegBytes)
         MockURLProtocol.requestHandler = { request in
-            (self.httpResponse(request.url!, 200), responseBytes)
+            (self.httpResponse(request.url!, 200), responseBytes.current)
         }
 
         let firstFetch = Date(timeIntervalSince1970: 1_000)
@@ -85,7 +85,7 @@ final class CameraGridModelTests: XCTestCase {
         await model.refreshAll()
         XCTAssertEqual(model.snapshots["front_door"]?.snapshot?.capturedAt, firstFetch)
 
-        responseBytes = secondJpegBytes
+        responseBytes.current = secondJpegBytes
         currentTime = secondFetch
         await model.refreshAll()
         XCTAssertEqual(model.snapshots["front_door"]?.snapshot?.data, secondJpegBytes)
@@ -94,9 +94,9 @@ final class CameraGridModelTests: XCTestCase {
 
     @MainActor
     func testRefreshAllKeepsLastGoodSnapshotOnSubsequentFailure() async {
-        var shouldFail = false
+        let shouldFail = LockedBox(false)
         MockURLProtocol.requestHandler = { request in
-            shouldFail
+            shouldFail.current
                 ? (self.httpResponse(request.url!, 500), Data())
                 : (self.httpResponse(request.url!, 200), self.jpegBytes)
         }
@@ -105,7 +105,7 @@ final class CameraGridModelTests: XCTestCase {
         await model.refreshAll()
         XCTAssertEqual(model.snapshots["front_door"]?.snapshot?.data, jpegBytes)
 
-        shouldFail = true
+        shouldFail.current = true
         await model.refreshAll()
         XCTAssertEqual(
             model.snapshots["front_door"]?.snapshot?.data,

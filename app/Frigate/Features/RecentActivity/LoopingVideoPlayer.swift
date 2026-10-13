@@ -164,7 +164,7 @@ private struct PlayerLayerView: UIViewRepresentable {
             // touching the layer, and hops to the main actor to publish.
             observation = layer.observe(\.isReadyForDisplay, options: [.initial, .new]) { @Sendable [weak controller] _, change in
                 guard let ready = change.newValue else { return }
-                Task { @MainActor in controller?.setReadyForDisplay(ready) }
+                Task { @MainActor [weak controller] in controller?.setReadyForDisplay(ready) }
             }
         }
 

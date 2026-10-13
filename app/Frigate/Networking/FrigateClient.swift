@@ -74,6 +74,51 @@ actor FrigateClient {
         return data
     }
 
+    /// A response that never ends, delivered as it arrives - the MJPEG live feed (P4.2), which is
+    /// one HTTP response streaming `multipart/x-mixed-replace` parts forever. `send`/`data` are
+    /// wrong for it by construction: they buffer to completion, and this response never completes.
+    ///
+    /// Same auth story as everything else: the session attaches the cookie jar, and a `401` gets
+    /// one silent re-login + retry before surfacing.
+    func byteStream(for endpoint: Endpoint) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        try await byteStream(for: endpoint, allowRetry: true)
+    }
+
+    private func byteStream(
+        for endpoint: Endpoint,
+        allowRetry: Bool
+    ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        let request = try makeRequest(endpoint)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await session.bytes(for: request)
+        } catch let urlError as URLError {
+            throw APIError.transport(urlError)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport(URLError(.badServerResponse))
+        }
+
+        switch http.statusCode {
+        case 200...299:
+            return (bytes, http)
+        case 401:
+            // The failed response's transfer must be cancelled explicitly - `data(for:)` reads
+            // bodies to completion, but an abandoned byte stream would otherwise hold its
+            // connection (and, for the MJPEG feed, a per-client encoder on the server) open.
+            bytes.task.cancel()
+            if allowRetry, let credentials {
+                try await credentials.reauthenticate(self)
+                return try await byteStream(for: endpoint, allowRetry: false)
+            }
+            throw APIError.unauthorized
+        default:
+            bytes.task.cancel()
+            throw APIError.http(status: http.statusCode, body: Data())
+        }
+    }
+
     // MARK: Core
 
     private func endpointURL(_ endpoint: Endpoint) throws -> URL {
@@ -206,5 +251,68 @@ extension FrigateClient {
     /// `AVURLAssetHTTPCookiesKey` - AVFoundation does not consult `URLSession`'s cookie jar itself.
     func sessionCookies(for url: URL) -> [HTTPCookie] {
         session.configuration.httpCookieStorage?.cookies(for: url) ?? []
+    }
+}
+
+// MARK: WebSockets (P4 live view)
+
+extension FrigateClient {
+    /// Re-runs `/api/login` so a stale session cookie is replaced.
+    ///
+    /// Every ordinary request self-heals on a `401` through the retry seam, but a WebSocket
+    /// handshake has no such path: it carries whatever cookie the jar held and simply fails. The
+    /// live-view retry calls this once so an expired session recovers instead of being reported as
+    /// an unresponsive server. Silent on failure - the caller is already in a retry, and the error
+    /// it eventually reports is more informative than one from here.
+    func refreshSession() async {
+        guard let credentials else { return }
+        try? await credentials.reauthenticate(self)
+    }
+
+    /// The exact handshake request `liveSocket(for:)` will use. Public for tests and for logging a
+    /// failed live connection - when a socket is refused, the request that was refused is the
+    /// single most useful thing to see.
+    func webSocketRequest(for endpoint: Endpoint) throws -> URLRequest {
+        let httpURL = try endpointURL(endpoint)
+        guard let socketURL = Self.webSocketScheme(httpURL) else { throw APIError.invalidURL }
+
+        var request = URLRequest(url: socketURL)
+        for (field, value) in endpoint.headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+
+        // nginx gates `/live/webrtc/api/ws` with the same `auth_request` as `/clips/` and `/vod/`,
+        // so the handshake needs `frigate_token`. The session would normally attach jar cookies
+        // itself, but set them explicitly as a belt - a silent miss here surfaces as an unexplained
+        // server rejection, which is the most expensive kind of bug to chase.
+        //
+        // Note the lookup uses the **http(s)** URL, not the ws(s) one: `HTTPCookieStorage` decides
+        // whether to hand back `Secure` cookies by looking at the URL's scheme, and `wss` is not on
+        // its list of secure schemes.
+        let cookies = session.configuration.httpCookieStorage?.cookies(for: httpURL) ?? []
+        if !cookies.isEmpty {
+            for (field, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+        }
+        return request
+    }
+
+    /// A signaling socket built from this client's own `URLSession`, so it inherits the shared
+    /// cookie jar and the `InsecureTrustDelegate`. Call `start()` on the result to connect.
+    func liveSocket(for endpoint: Endpoint) throws -> LiveSocket {
+        LiveSocket(task: session.webSocketTask(with: try webSocketRequest(for: endpoint)))
+    }
+
+    private static func webSocketScheme(_ url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        switch components.scheme {
+        case "https": components.scheme = "wss"
+        case "http": components.scheme = "ws"
+        default: break
+        }
+        return components.url
     }
 }

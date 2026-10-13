@@ -2,11 +2,16 @@ import SwiftUI
 
 struct CameraListView: View {
     let client: FrigateClient
+    let config: FrigateConfig
     @State private var model: CameraGridModel
+    @State private var presentedCamera: CameraPresentation?
+    @State private var isVisible = false
+    @Environment(\.scenePhase) private var scenePhase
 
-    init(client: FrigateClient, cameraNames: [String]) {
+    init(client: FrigateClient, config: FrigateConfig) {
         self.client = client
-        _model = State(wrappedValue: CameraGridModel(client: client, cameraNames: cameraNames))
+        self.config = config
+        _model = State(wrappedValue: CameraGridModel(client: client, cameraNames: config.enabledCameraNames))
     }
 
     var body: some View {
@@ -31,12 +36,13 @@ struct CameraListView: View {
 
                             LazyVStack(spacing: 16) {
                                 ForEach(model.cameraNames, id: \.self) { name in
-                                    NavigationLink {
-                                        CameraDetailView(client: client, cameraName: name)
+                                    Button {
+                                        presentedCamera = CameraPresentation(cameraName: name)
                                     } label: {
                                         CameraRow(state: model.snapshots[name] ?? .loading)
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel("Open \(name.replacingOccurrences(of: "_", with: " ")) camera")
                                 }
                             }
                             .padding(16)
@@ -45,10 +51,45 @@ struct CameraListView: View {
                 }
             }
             .navigationTitle("Cameras")
-            .task { model.startAutoRefresh() }
-            .onDisappear { model.stopAutoRefresh() }
+            .onAppear {
+                isVisible = true
+                if scenePhase == .active { model.startAutoRefresh() }
+            }
+            .onDisappear {
+                // The full-screen viewer shares this store and still needs its updates.
+                guard presentedCamera == nil else { return }
+                isVisible = false
+                model.stopAutoRefresh()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    if isVisible || presentedCamera != nil { model.startAutoRefresh() }
+                case .background:
+                    model.stopAutoRefresh()
+                case .inactive:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+            .fullScreenCover(item: $presentedCamera, onDismiss: {
+                if scenePhase == .active, isVisible { model.startAutoRefresh() }
+            }) { presentation in
+                CameraDetailView(
+                    client: client,
+                    cameraName: presentation.cameraName,
+                    config: config,
+                    snapshots: model
+                )
+            }
         }
     }
+}
+
+private struct CameraPresentation: Identifiable {
+    let cameraName: String
+    var id: String { cameraName }
 }
 
 private struct CameraRow: View {
@@ -71,10 +112,15 @@ private struct CameraRow: View {
 /// loading, the decoded JPEG once loaded, or an offline glyph on failure.
 struct SnapshotImage: View {
     let state: CameraGridModel.SnapshotState
+    var contentMode: ContentMode = .fill
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10).fill(.thinMaterial)
+            if contentMode == .fit {
+                Color.black
+            } else {
+                RoundedRectangle(cornerRadius: 10).fill(.thinMaterial)
+            }
             switch state {
             case .loading:
                 ProgressView()
@@ -82,7 +128,7 @@ struct SnapshotImage: View {
                 if let image = UIImage(data: snapshot.data) {
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: contentMode)
                 } else {
                     Image(systemName: "exclamationmark.triangle")
                         .foregroundStyle(.secondary)

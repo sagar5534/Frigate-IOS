@@ -129,6 +129,42 @@ nonisolated extension Endpoint {
         )
     }
 
+    /// go2rtc's WebRTC signaling socket. Off the server root (not `/api/`), like `/clips/` and
+    /// `/vod/`, and gated by the same nginx `auth_request` - so the handshake needs the session
+    /// cookie. `src` is the **go2rtc stream name**, which is not always the camera name; resolve it
+    /// with `LiveStreamSource.ladder(camera:config:)` rather than passing a camera name through.
+    static func webrtcWebSocket(src: String) -> Endpoint {
+        Endpoint(
+            path: "live/webrtc/api/ws",
+            query: [URLQueryItem(name: "src", value: src)],
+            basePath: nil
+        )
+    }
+
+    /// go2rtc's MSE socket (P4.1). Same go2rtc `/api/ws` behind the same nginx `auth_request` as
+    /// the WebRTC route - nginx just mounts it twice - so everything `webrtcWebSocket` says about
+    /// cookies applies here verbatim. The handshake differs after the upgrade: send
+    /// `{"type":"mse","value":"<codecs>"}`, then fMP4 arrives as binary frames.
+    static func mseWebSocket(src: String) -> Endpoint {
+        Endpoint(
+            path: "live/mse/api/ws",
+            query: [URLQueryItem(name: "src", value: src)],
+            basePath: nil
+        )
+    }
+
+    /// Frigate's own MJPEG feed for a camera (P4.2): `multipart/x-mixed-replace` off the **detect**
+    /// stream, JPEG-encoded server-side *per connected client* (`frigate/api/media.py`). `height`
+    /// above the detect resolution only upscales and `fps` above the detect rate only duplicates
+    /// frames - both pure waste of the server's CPU - so callers should clamp to the camera's
+    /// detect config, which is what `LiveStreamSource` does.
+    static func mjpegFeed(camera: String, height: Int, fps: Int) -> Endpoint {
+        Endpoint(path: camera, query: [
+            URLQueryItem(name: "height", value: String(height)),
+            URLQueryItem(name: "fps", value: String(fps)),
+        ])
+    }
+
     /// HLS VOD manifest for a segment's camera/time range - the source Frigate recommends for
     /// iOS playback over the progressive `clip.mp4`. Off the server root, not `/api/`.
     static func reviewClipHLS(camera: String, start: Double, end: Double) -> Endpoint {

@@ -1,13 +1,13 @@
 import Foundation
 import Observation
 
-/// Drives the camera list: holds one snapshot per camera and refreshes all of them concurrently
-/// on a timer. `CameraDetailModel` uses the same client at a larger size for the single-camera view,
-/// and shares `SnapshotState`/`Snapshot` and the staleness rule below via `SnapshotState.advanced`.
+/// Drives the camera list and the viewer's thumbnail strip: holds one snapshot per camera and
+/// refreshes all of them concurrently on a timer. Both surfaces share `SnapshotState`/`Snapshot`
+/// and the staleness rule below via `SnapshotState.advanced`.
 @MainActor
 @Observable
 final class CameraGridModel {
-    /// A decoded frame plus when it was *fetched*. `/api/{camera}/latest.jpg` reports no capture
+    /// JPEG bytes plus when they were *fetched*. `/api/{camera}/latest.jpg` reports no capture
     /// time, so this is our own fetch time - close enough for a freshness badge, but not a claim
     /// about when the camera actually saw the frame.
     struct Snapshot: Equatable {
@@ -28,6 +28,7 @@ final class CameraGridModel {
     private let thumbnailHeight: Int
     private let now: () -> Date
     private var refreshTask: Task<Void, Never>?
+    var isAutoRefreshing: Bool { refreshTask != nil }
 
     init(
         client: FrigateClient,
@@ -46,7 +47,7 @@ final class CameraGridModel {
     /// This spawns an unstructured `Task`, not a child of any SwiftUI `.task` - it is NOT cancelled
     /// by that view's `.task` being torn down. Callers must pair this with `stopAutoRefresh()` in
     /// `.onDisappear` (see `CameraGridView`); the `refreshTask == nil` guard below just prevents a
-    /// second loop if `.task` re-runs while one is already active.
+    /// second loop if a list lifecycle callback runs while one is already active.
     func startAutoRefresh(interval: Duration = .seconds(5)) {
         guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
@@ -90,7 +91,7 @@ extension CameraGridModel.SnapshotState {
         return nil
     }
 
-    /// The shared staleness rule for both `CameraGridModel` and `CameraDetailModel`:
+    /// The shared staleness rule for every snapshot surface:
     /// - Identical bytes to the currently-held frame mean the stream is stuck, not that a fresh
     ///   frame just arrived - keep the existing `capturedAt` so the age badge keeps climbing rather
     ///   than resetting to "Now" every poll.

@@ -27,7 +27,7 @@ against that goal.
 ```
 Frigate --> MQTT/webhook --> notifier --> relay --> APNs/FCM --> iPhone (app)
                                                           |
-iPhone app <--- HTTP API / HLS / snapshots / clips <--- Frigate
+iPhone app <--- HTTP API / snapshots / clips / go2rtc live <--- Frigate
 ```
 
 Three components:
@@ -54,8 +54,9 @@ or fully automated by the add-on.
 
 ## Beyond v1
 
-- **WebRTC** sub-second live view as a drop-in behind the `LivePlayer` interface (HLS ships
-  first).
+- **Live view fallback tiers** behind the `LivePlayer` interface: WebRTC ships first (P4), with
+  **MSE** (P4.1) and **MJPEG** (P4.2) as drop-in conformers for users whose networks cannot carry
+  WebRTC's media path. Frigate exposes no live HLS at all - see `DECISIONS.md` ADR-012.
 - **Feature parity** with the PWA: recordings timeline, PTZ, two-way audio, quiet hours, full
   settings.
 - **Upstream contribution** of a generic outbound webhook to Frigate that benefits the whole

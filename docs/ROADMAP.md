@@ -54,8 +54,10 @@ every post-login request 401'd (see LEARNINGS.md). Sign-in now works end-to-end.
 - [x] App shell / navigation (Cameras, Events) - `MainTabView` (Cameras/Events/Settings tabs) replaces the P1 `MainPlaceholderView`
 - [x] Fetch `/api/config`, parse camera list - `FrigateConfig.CameraConfig.enabled` + `enabledCameraNames`; verified field shapes against a real server (frigate.sagarp.ca)
 - [x] Camera list of snapshot rows - `CameraListView`/`CameraGridModel`, `GET /api/{camera}/latest.jpg?height=N`. Reworked from a grid to a full-width, free-scrolling list (one camera per row) with a bottom-right "x ago"/"Now" freshness badge (`SnapshotAgeBadge`), Apple Home-style
-- [x] Auto-refresh snapshots every few seconds - `CameraGridModel.startAutoRefresh()` (5s loop, cancelled on disappear)
-- [x] Tap camera to open a larger snapshot / detail view - `CameraDetailView`/`CameraDetailModel` (720p, own refresh loop)
+- [x] Auto-refresh snapshots every few seconds - one shared `CameraGridModel` 5s loop serves the
+  list and viewer, paused when the Cameras feature is hidden or the app backgrounds
+- [x] Tap camera to open a larger snapshot / detail view - now superseded by the full-screen
+  single-page camera viewer below
 - [x] Minimal Settings: server info, connection status, log out - `SettingsView`
 
 _Milestone: see all your cameras, updating._
@@ -99,14 +101,81 @@ signal a real server hasn't disproven._
   and loop, scrolling snaps with no black cards, tap pushes `ReviewDetailView`, marking reviewed
   removes the card, and the empty state leaves no gap above the camera list._
 
-## P4 - Live video
-- [ ] Define the `LivePlayer` interface
-- [ ] `HLSPlayer` implementation (AVPlayer + HLS)
-- [ ] Single-camera fullscreen live view
-- [ ] Wire live view into the camera detail screen
-- [ ] Reconnect / clean teardown handling
+## P4 - Live video (WebRTC) - DONE
+Frigate exposes **no live HLS** - the original `HLSPlayer` plan is void (ADR-012). Live view is a
+three-tier ladder built as three separate phases; P4 is the top rung only. Plan:
+`docs/plans/P4-live-video.md`.
+- [x] C1 - `LivePlayer` seam + live source resolution - `LiveTransport`/`LiveStreamSource.ladder`,
+  `FrigateConfig.go2rtc` + `CameraConfig.live`, `LivePlayer`/`LivePlayerState`/`LivePlayerError`/
+  `LivePlayerFactory`, `SignalingChannel` + `LiveSocket`, `Endpoint.webrtcWebSocket`,
+  `FrigateClient.webSocketURL`/`webSocketRequest`/`liveSocket`. 145 tests green (was 126).
+  Found that `JSONDecoder`'s `allKeys` is hash order, so stream resolution can't use position -
+  see `LEARNINGS.md` and the plan's C1 ordering finding
+- [x] C2 - go2rtc signaling - `SignalingMessage` codec + `WebRTCSignaling` (buffers candidates that
+  arrive before the answer, since `RTCPeerConnection.add(_:)` rejects those), tested against
+  `FakeSignalingChannel`. 157 tests (2 skipped).
+  **Gate passed against frigate.sagarp.ca:** the signaling socket opens through nginx
+  `auth_request` with the session cookie and is refused without it, so cookie-authed WebSockets
+  work and the route really is protected. All 9 cameras resolve to WebRTC. Every one of them
+  declares `Main Stream`/`Sub Stream`, which made C1's tiebreak load-bearing in practice and led to
+  preferring the stream *label* over sorting stream names
+- [x] C3 - WebRTC dependency + player - `stasel/WebRTC` pinned at 151.0.0 (12MB on the arm64
+  release slice, not the ~30MB the plan assumed); `PeerConnectionObserver` bridges libwebrtc's
+  delegate onto an ordered `AsyncStream`; `WebRTCLivePlayer` does recvonly-video negotiation and
+  maps connection state onto `LivePlayerState`; `LiveVideoView` hosts `RTCMTLVideoView`.
+  Verified end to end: a moving picture from a real camera, H.264, ~2s to first frame
+- [x] C4 - Wired into camera detail - `LiveCameraModel`/`LiveCameraView`; the camera list stays on
+  the P2 snapshot loop and live starts only when a camera is opened. The snapshot sits *under* the
+  video permanently (a Metal view with no frame is transparent), so there is no crossfade to tune
+  and a failure falls back to a working picture. Tap to fullscreen, letterboxed to the stream's
+  real aspect. The snapshot poll and its freshness badge stop once video is genuinely on screen
+- [x] C5 - Reconnect and teardown - exponential backoff with an attempt cap, a startup deadline so
+  a stuck connection fails in 12s instead of libwebrtc's ~30s+, a stall grace period, and teardown
+  on `onDisappear`/`scenePhase`. `.iceFailed` is deliberately *not* auto-retried (it is structural)
+  and `.noVideo` was added so a connected-but-silent camera stops being blamed on the network
 
-_Milestone: watch a live camera._
+_Milestone: **met.** Verified end to end against frigate.sagarp.ca in the simulator: tap a camera ->
+snapshot immediately -> live H.264 within ~2s -> fullscreen -> back, with the snapshot loop resuming.
+Two real bugs were found only by doing this (see `LEARNINGS.md`): renderers silently unsubscribed
+because the `RTCVideoTrack` wrapper wasn't retained, and the startup deadline blamed port 8555 for a
+connection that had already succeeded._
+
+## P4.1 - Live video: MSE tier - DONE
+Real H.264/H.265 at ~1-2s over the **same authenticated HTTPS origin**, so it reaches users behind
+Cloudflare Tunnel and other setups WebRTC's port-8555 media path cannot cross.
+- [x] `MSELivePlayer` behind the existing seam - `Features/Live/MSE/`: `FMP4Demuxer` (hand-written
+  incremental fMP4 demuxer, H.264 `avcC` + H.265 `hvcC`, rejects shapes go2rtc never emits rather
+  than guessing), `VideoSampleBufferFactory`, `SampleBufferVideoView`
+  (`AVSampleBufferDisplayLayer`), `MSELivePlayer` (codec handshake over the shared `LiveSocket`'s
+  new `MediaChannel` view, renderer + `AVSampleBufferRenderSynchronizer` pinned near the live
+  edge, 4s handshake deadline, renderer failure -> `.decodeFailed`). Demuxer tested against
+  hand-built segments using real x264/x265 parameter sets that VideoToolbox validates
+- [x] Automatic escalation down the ladder when the tier above fails - `LiveCameraModel` walks the
+  ladder: structural failures (`.iceFailed`, `.decodeFailed`) and silent tiers (`.noVideo`)
+  escalate immediately, `.signalingFailed` retries once (session refresh) first, `.connectionLost`
+  spends its retry budget before trading down. Policy recorded as ADR-013
+
+_Milestone: a user whose network blocks WebRTC still gets real video._
+
+## P4.2 - Live video: MJPEG tier - DONE
+The floor: `multipart/x-mixed-replace` off the existing `FrigateClient` path. No ports, no YAML, no
+go2rtc. Also the **only** option for cameras with no restream configured, so this tier is what
+makes live view work for every camera rather than most.
+- [x] `MJPEGLivePlayer` behind the existing seam - `Features/Live/MJPEG/`: `MultipartFrameParser`
+  (incremental, splits on the spec's `\r\n--boundary` delimiter so JPEG bytes can't tear a frame,
+  emits a frame from its own EOI terminator instead of waiting 1/fps for the next boundary) +
+  `MJPEGLivePlayer` over the new `FrigateClient.byteStream(for:)` (same silent 401 re-login as
+  everything else). Requests are clamped to the camera's detect config (new
+  `FrigateConfig.DetectInfo`), since the server JPEG-encodes per connected client
+- [x] Non-restreamed cameras resolve to this tier automatically - `LiveStreamSource.ladder` has
+  always put `.mjpeg` last for every camera and alone for non-restreamed ones; the factory now
+  builds it
+
+_Milestone: every camera shows motion, on every network._
+_Status: implemented and unit-tested (261 tests, up from 203 after P4; zero build warnings). The
+four real-server integration gates in `LiveServerIntegrationTests` (WebRTC signaling x2, MSE
+handshake+demux, MJPEG feed+decode) skip without credentials - **run them and a device pass
+before calling the ladder verified end-to-end**; see "To verify" below._
 
 ---
 
@@ -123,7 +192,7 @@ HA add-on + Docker for the notifier; bring-your-own-push escape hatch.
 _Milestone: a new user installs from a documented, supported path._
 
 ## P8 - Parity extras
-Recordings timeline, PTZ, two-way audio, quiet hours, WebRTC low-latency live, full settings.
+Recordings timeline, PTZ, two-way audio, quiet hours, full settings.
 _Milestone: feature parity with the PWA._
 
 ---
@@ -137,3 +206,31 @@ _Milestone: feature parity with the PWA._
   whole HLS request chain, not just the initial fetch
 - **P3, not yet done:** whether `/api/review`'s `start_time`/`end_time` come back numeric (assumed
   throughout `ReviewSegment`) or ever as ISO strings on some server/version
+- **P4:** whether the `frigate_token` cookie really rides the WebSocket handshake through nginx's
+  `auth_request` on `/live/webrtc/api/ws` (C2 proves this before any WebRTC code exists)
+- **P4:** whether go2rtc's advertised ICE candidates are reachable from cellular and from LAN on
+  the real server, and what the app-size hit of the libwebrtc xcframework actually is
+- **P4.1/P4.2, not yet done:** the real-server gates in `LiveServerIntegrationTests`
+  (`testMSESocketNegotiatesAndStreamsParsableMedia`, `testMJPEGFeedStreamsDecodableFrames`) -
+  they skip without `TEST_RUNNER_FRIGATE_TEST_*` credentials, and no session with credentials has
+  run them yet. They are the check that go2rtc's actual fMP4 matches what `FMP4Demuxer` accepts
+  and that the MJPEG boundary parsing holds against real traffic
+
+- **P4.1/P4.2, not yet done:** an end-to-end escalation pass in the app - block port 8555 (or use
+  a network that does) and watch a camera land on MSE; disable a camera's restream and confirm
+  MJPEG plays; check MSE's live-edge latency and the decode-session budget with the Recent
+  Activity strip on screen
+
+## Camera viewer redesign
+- [x] Replace the pushed detail screen with a full-screen, single-page camera viewer
+- [x] Add the custom close/title/mute header and horizontally scrolling camera switcher
+- [x] Preserve single-player lifecycle, snapshot fallback, reconnect, and background teardown
+- [x] Add WebRTC receive-audio support and an honest unavailable state on video-only transports
+- [x] Use an output-only WebRTC audio device so receive-only camera audio does not access the mic
+- [x] Share the list's snapshot store with the viewer and keep one refresh loop across presentation
+- [x] Fit live frames from every transport without cropping non-16:9 cameras
+- [x] Add regression tests and pass the full simulator suite
+
+_Milestone: tapping any camera opens one full-screen viewer, switching cameras never overlaps live
+players, audio begins muted, and the doorbell's full frame is visible on device. The full simulator
+suite passes with parallel testing disabled._

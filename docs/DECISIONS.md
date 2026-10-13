@@ -2,6 +2,126 @@
 
 Short architecture decision records: the choice, why, and consequences. Newest first.
 
+## ADR-013 - Live tier escalation: structural failures fall down the ladder; transient ones retry in place
+
+**Context:** With all three tiers built (P4-P4.2), a failed tier finally has somewhere to go. The
+PWA's answer is coarse - any player error swaps in the next source type. Ours distinguishes what
+the failure *means*, because the failures carry meaning by design (ADR-012's C5 work):
+
+**Decision (`LiveCameraModel`):**
+- **`.iceFailed` / `.decodeFailed` escalate immediately.** Both are structural facts about the
+  tier - port 8555 unreachable from this network; bytes this device cannot play - and retrying
+  reproduces them exactly. This is the payoff case: a network that blocks WebRTC now lands on MSE
+  (same authenticated HTTPS origin) within seconds instead of showing a router-configuration card.
+- **`.noVideo` escalates immediately.** The tier connected and showed nothing; the MJPEG floor
+  reads a genuinely *different source* (the detect pipeline, not the restream), so it can succeed
+  where the restream is silent.
+- **`.signalingFailed` gets one same-rung retry first**, because that retry path refreshes a
+  possibly-stale session cookie - the WebSocket handshake has no 401-retry of its own, and an
+  expired cookie is the most likely cause. Second failure escalates.
+- **`.connectionLost` spends the whole bounded retry budget on its own tier** before escalating:
+  the tier demonstrably worked, and quality should not be traded away over one blip.
+- The bottom rung keeps P4's behavior (bounded retries for transient failures, wait-for-user on
+  structural ones). Escalation only ever moves down; a manual Retry - new information about the
+  network - restarts the walk at the top, and so does a fresh screen visit. Automatic reconnects
+  stay on their rung.
+
+Two implementation decisions that shape the tiers themselves:
+- **MSE demuxes by hand** (`FMP4Demuxer`, ~500 lines): surveyed again in ADR-012, no library
+  consumes a live fMP4 byte stream. The demuxer reads exactly what go2rtc emits and *rejects* the
+  shapes it never emits (absolute `base_data_offset`, `trun` without a data offset) instead of
+  guessing - a wrong guess corrupts video silently, an error escalates to MJPEG loudly.
+- **MJPEG requests are clamped to the detect stream** (`min(detect.height, 720)`,
+  `min(detect.fps, 5)`): the server JPEG-encodes *per connected client*, and anything above the
+  detect stream's own shape is upscaling paid for in server CPU.
+
+**Consequences:** every camera gets a live picture on every network (the P4.2 milestone), and the
+error cards from C5 become nearly unreachable - they now only appear when the *floor* fails.
+Worst-case walk to the floor is bounded by the 12s startup deadline per rung plus the MSE
+handshake deadline (4s), not by open-ended retries. No automatic climb *back up* exists yet
+(a user on MJPEG stays there until they leave the screen or retry); that is deliberate scope
+control, not an oversight.
+
+## ADR-012 - Live view: Frigate exposes no live HLS; WebRTC first, MSE and MJPEG as separate later phases
+
+**Context:** `CLAUDE.md`, `VISION.md` and P4's original roadmap bullets all assumed v1 live view
+would be an `HLSPlayer` (AVPlayer + HLS), with WebRTC slotting in later as the upgrade. Read
+directly from `~/Documents/frigate` (go2rtc pinned at **v1.9.14**, `docker/main/Dockerfile:66`),
+**that source does not exist.** The only live transports a Frigate server exposes are:
+
+| Transport | URL | Auth | Native iOS story |
+|---|---|---|---|
+| **WebRTC (go2rtc)** | `ws(s)://{base}/live/webrtc/api/ws?src={stream}` | nginx `auth_request` (cookie) | Needs a libwebrtc binary; rendering is free. |
+| **MSE (go2rtc)** | `ws(s)://{base}/live/mse/api/ws?src={stream}` | same | fMP4 over WebSocket. No MSE API on iOS - the bytes must be demuxed by hand and fed to `AVSampleBufferDisplayLayer`. |
+| **jsmpeg** | `ws(s)://{base}/live/jsmpeg/{camera}` | same | MPEG1 over WebSocket; no hardware decode path. Dead end. |
+| **MJPEG** | `GET /api/{camera}?fps=&height=&bbox=…` | cookie (normal API path) | `multipart/x-mixed-replace` JPEG stream. Trivial to consume; not real video. |
+
+**On HLS specifically, since it is the assumption being reversed:** go2rtc the binary *does* have
+an HLS consumer (`/api/stream.m3u8?src=`). It is unreachable. nginx has no generic go2rtc proxy -
+the `go2rtc` upstream (`127.0.0.1:1984`, `go2rtc_upstream.conf`) is addressed by exactly four
+locations: `/live/mse/api/ws` and `/live/webrtc/api/ws` (both to `go2rtc/api/ws`, GET only),
+`/live/webrtc/webrtc.html`, and `/api/go2rtc/webrtc` (POST only). `/api/` proxies to the Python
+app, so `/api/stream.m3u8` reaches FastAPI and 404s. `create_config.py` sets no `listen` override,
+so go2rtc binds `:1984` on all container interfaces, but no standard deployment publishes that
+port - and publishing it would expose an entirely unauthenticated camera API, strictly worse than
+the port-forwarding problem WebRTC already has.
+
+Two HLS surfaces do exist in Frigate's nginx and neither is live: `/vod/` (nginx-vod-module over
+finalized recording files, which is what P3's clip playback uses) and a vestigial
+`location /stream/` serving `/tmp` with `m3u8`/`ts`/`mpd` MIME types that **nothing in the current
+codebase writes to** (`grep -rn "tmp/stream"` over the whole repo returns zero hits). Frigate's own
+PWA confirms the shape: `use-camera-live-mode.ts` picks `mse` when restreamed, `webrtc` when
+restreamed without MediaSource, `jsmpeg` when not restreamed. It never uses HLS for live.
+
+**Decision:** live view is a **three-tier ladder, each tier its own phase**, built in order:
+
+| Phase | Tier | Why it exists |
+|---|---|---|
+| **P4** | **WebRTC** via go2rtc signaling + `RTCMTLVideoView` | Best experience Frigate can produce: sub-second latency, hardware decode, audio and two-way talk available later. |
+| **P4.1** | **MSE** - fMP4 over WebSocket into `AVSampleBufferDisplayLayer` | Real H.264 at ~1-2s over the *same authenticated HTTPS origin*, so it reaches users behind Cloudflare Tunnel and similar where WebRTC's media path cannot go. |
+| **P4.2** | **MJPEG** - `multipart/x-mixed-replace` off the existing client | The floor. No ports, no YAML, no go2rtc at all. Also the only option for cameras with no restream configured. |
+
+Ordering is by quality, and each tier answers the tier above it failing. WebRTC's weakness is
+reach, not quality: media rides a separate TCP/UDP connection on **port 8555**, which external
+access needs forwarded and LAN access needs declared in go2rtc's `webrtc: candidates:` YAML -
+router configuration plus YAML editing, exactly what this project's "move fast, keep setup
+seamless" priority and its "config lives in the app UI, not YAML" rule exist to avoid. MSE answers
+that without giving up real video; MJPEG answers everything else at the cost of being a slideshow.
+
+**Phases, not chunks of one phase.** Each tier is independently verifiable against a real server
+and independently valuable, and the later two are demand-driven - we do not yet know how common
+tunnel-only users are. Building all three at once would pay for reach we cannot measure. P4 is
+scoped to WebRTC alone so the hard path gets proven end-to-end rather than hidden behind a
+fallback that quietly absorbs its failures (the shape of the P3 mistake, where clip playback
+shipped unverified).
+
+**The seam is built in P4 even though only one rung exists.** `LiveTransport` enumerates all three
+tiers from day one and `LiveStreamSource.ladder(camera:config:)` returns the ordered preference
+list for a camera; `LivePlayerFactory` builds the best rung that has an implementation in this
+build and returns `nil` for the rest. Adding MSE or MJPEG later is one new `LivePlayer` conformer
+plus one case in the factory, with no call-site changes. Automatic escalation on failure is
+deliberately deferred to P4.2: with one implemented rung there is nothing to escalate to, and a
+state machine with no second rung to test against is speculation.
+
+**Dependency:** one SPM package, [`stasel/WebRTC`](https://github.com/stasel/WebRTC), pinned to an
+exact version (151.0.0 at time of writing). Chosen over LiveKit's
+[`webrtc-xcframework`](https://github.com/livekit/webrtc-xcframework) (137.7151.x), which renames
+the module to `LiveKitWebRTC` and prefixes every Objective-C symbol with `LK` for vendoring inside
+their SDK, and tracks a considerably older libwebrtc. stasel's is unmodified upstream, built in
+the open via GitHub Actions, and meant for standalone consumption. LiveKit's stays the fallback if
+it ever stalls. No *other* library is worth taking: go2rtc's signaling is its own protocol with no
+Swift client, so a full WebRTC SDK (LiveKit, Daily, Agora) would not speak it; and
+`URLSessionWebSocketTask` is the right socket precisely because it inherits `FrigateClient`'s
+cookie jar and insecure-trust delegate, which a third-party socket library would throw away.
+
+**Consequences:** the original "ship `HLSPlayer` only for v1" rule in `CLAUDE.md` is inverted, and
+"low-res HLS for the grid" becomes "snapshots for the grid" - the grid stays on the P2 snapshot
+loop, which preserves the actual intent of that rule ("never WebRTC a grid"). Until P4.1/P4.2 land,
+a user whose network cannot carry WebRTC has **no** live view, so `LivePlayerError.iceFailed` must
+say something true and specific rather than spin - that messaging is a P4 deliverable, not a
+nicety. And the MSE handshake stays documented in the P4 plan so the deferred work needs no
+re-research.
+
 ## ADR-011 - Clip playback: HLS VOD manifest, not progressive `clip.mp4`
 
 **Context:** P3's roadmap called for clip playback "via AVPlayer (mp4 - the easy video)," and the

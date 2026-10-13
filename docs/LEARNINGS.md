@@ -214,3 +214,196 @@ Four things that are not obvious and each cost a real behaviour if missed:
 Unrelated but adjacent: `@Observable` fires on *assignment*, not on change. A poll that re-publishes
 an identical list still invalidates the view - guard on equality before assigning, or a 30s refresh
 re-identifies the cards and restarts their playback.
+
+## `JSONDecoder`'s `allKeys` is hash order - not document order, and not stable across launches
+
+Frigate's `/api/config` has two objects whose **keys are user-defined names**: `go2rtc.streams`
+(stream name -> source) and per-camera `live.streams` (label -> stream name). The PWA picks a
+camera's live stream with `Object.values(camera.live.streams)[0]`, which is the user's declaration
+order because JavaScript preserves JSON object order.
+
+Swift does not, and the failure is worse than "sorted instead". Reading a nested
+`KeyedDecodingContainer`'s `allKeys` for the document
+
+```json
+{"mike": …, "alpha": …, "zulu": …, "bravo": …, "yankee": …, "charlie": …}
+```
+
+returned `["yankee", "mike", "alpha", "bravo", "charlie", "zulu"]` - **hash order**. A three-key
+probe happened to come back alphabetical, which is exactly the coincidence that would have let a
+smaller test enshrine the wrong conclusion. Since Swift seeds its hasher per process, the "natural"
+order genuinely differs from one app launch to the next: a camera with several configured streams
+would have opened a different one each time the app started.
+
+There is no ordered-JSON option in Foundation (`JSONSerialization` is unordered too), and
+`Decoder` gives no access to the raw bytes, so preserving document order would mean hand-parsing
+that sub-object. Not worth it for a field that has one entry on the overwhelming majority of
+cameras.
+
+What we do instead (`FrigateConfig.LiveInfo`, `LiveStreamSource`): **sort by label at decode time**
+so the array is at least deterministic, then layer a meaningful preference on top - a stream whose
+name equals the camera name wins, because that is Frigate's own default mapping
+(`frigate/config/config.py:990` writes `{name: name}`) and the near-universal convention for a
+camera's main stream. Alphabetically-first is only the tiebreak, and it is a guess; the array keeps
+every label so a stream picker (P8) can replace the guess with a choice.
+
+The general lesson: if a JSON object's key *order* carries meaning, decode it into an ordered
+representation with an explicit ordering rule you chose. Never let `allKeys` order reach behaviour.
+
+## `xcodebuild` ignores your shell's environment; test env vars need a `TEST_RUNNER_` prefix
+
+P4's opt-in live-server checks (`LiveServerIntegrationTests`) read `FRIGATE_TEST_URL` and friends
+from `ProcessInfo.processInfo.environment` and `XCTSkip` when they're missing. Invoked the obvious
+way:
+
+```bash
+FRIGATE_TEST_URL=… xcodebuild … -only-testing:FrigateTests/LiveServerIntegrationTests test
+```
+
+both tests skipped. The variables reach `xcodebuild` itself but not the process the test bundle
+runs in, so `ProcessInfo` never sees them. The fix is the `TEST_RUNNER_` prefix, which xcodebuild
+forwards into the test runner **with the prefix stripped**:
+
+```bash
+TEST_RUNNER_FRIGATE_TEST_URL=… xcodebuild … test
+```
+
+Verified empirically by pointing it at a nonexistent host: with the prefix the tests ran and failed
+on DNS, without it they skipped.
+
+The trap is the reporting, not the mechanism. A run where every test skipped still prints
+`** TEST SUCCEEDED **`, so an opt-in integration check that silently opted itself out looks exactly
+like one that passed. Any `XCTSkip` guarding a check that *matters* should say in its message how to
+actually run it - and when a skip is the answer to a question you asked, confirm it ran before
+believing the green.
+
+## libwebrtc's real app-size cost is 12MB, not the ~30MB everyone quotes
+
+The P4 plan carried "a ~30MB xcframework is the single biggest thing in the app" as received
+wisdom. Measured, with `stasel/WebRTC` 151.0.0 (M151) linked into the Frigate target:
+
+| Build | App bundle | `WebRTC.framework` | Slices |
+|---|---|---|---|
+| Debug, iOS Simulator | 30 MB | 27 MB | x86_64 + arm64 |
+| **Release, device** | **13 MB** | **12 MB** | arm64 |
+
+The 30MB figure is the *simulator* build: an unstripped debug binary carrying two architectures.
+The number that ships is the arm64 release slice, and it is 12MB - still ~90% of the app, since the
+app's own code is about 1MB, but less than half the folklore. Quote the release-device number; a
+`du -sh` of a Debug-iphonesimulator bundle overstates a binary dependency by ~2.2x.
+
+Measure it with a signing-free device build, which needs no provisioning:
+
+```bash
+xcodebuild -project app/Frigate.xcodeproj -scheme Frigate \
+  -destination 'generic/platform=iOS' -configuration Release CODE_SIGNING_ALLOWED=NO build
+```
+
+The arm64-simulator slice is present and links cleanly under Xcode 26 - the Debug simulator build's
+`lipo -info` reports `x86_64 arm64`, so Apple Silicon Macs need no Rosetta workaround.
+
+## An `RTCVideoTrack` you don't retain silently unsubscribes your renderers
+
+WebRTC connected, ICE reached `connected`, and `inbound-rtp` reported 74 frames received and 73
+decoded at 1600px. The screen stayed on the snapshot and **not one renderer callback ever fired** -
+neither `RTCMTLVideoView`'s nor a plain `RTCVideoRenderer` attached to the same track. No error, no
+crash, no log.
+
+The cause is ownership. `RTCVideoTrack.add(_:)` (`-addRenderer:`) wraps the renderer in an adapter
+that the **track** holds, and registers that adapter as a native sink. `RTCRtpReceiver.track`
+returns an ObjC wrapper that nothing else keeps alive, so:
+
+```swift
+// Compiles, runs, decodes video, renders nothing.
+(transceiver?.receiver.track as? RTCVideoTrack)?.add(renderer)
+```
+
+the wrapper deallocates at the end of the statement and takes its sinks with it. The fix is a
+strong reference for as long as you want frames:
+
+```swift
+private var videoTrack: RTCVideoTrack?   // must outlive the renderers
+...
+videoTrack = track
+track.add(renderer)
+```
+
+Two things worth carrying forward:
+
+- **Attach remote tracks in `peerConnection(_:didAdd:streams:)`**, not from
+  `addTransceiver(...)?.receiver.track`. The delegate hands over the receiver libwebrtc actually
+  feeds, and it is the path the samples use.
+- **Don't hang "is video flowing?" off a view's rendering.** The first-frame signal was originally
+  `RTCMTLVideoView.delegate`'s `didChangeVideoSize`, which only fires as a side effect of the view
+  *rendering* - needing a window, non-zero bounds, and working Metal. A separate `RTCVideoRenderer`
+  attached to the track answers the question being asked, whatever the view is doing.
+
+The debugging lesson is the general one: **`inbound-rtp` statistics are the first thing to reach
+for on a silent stream.** `bytesReceived` and `framesDecoded` split "the media path is blocked"
+from "the media path works and nothing is consuming it", and those look identical on screen while
+pointing at opposite fixes. Without the numbers the natural conclusion was "port 8555 is blocked" -
+which the app was busily telling the user, having reached `connected` seconds earlier.
+
+## A signal that fires once is not a signal that fires continuously
+
+This one shape produced three separate bugs in P4, each found later and more expensively than the
+last, and each looking like a different problem:
+
+1. **First-frame detection hung off `RTCMTLVideoView.delegate`.** That delegate fires as a side
+   effect of the view *rendering*, which needs a window, non-zero bounds and working Metal. Video
+   decoded 73 frames and it never fired once, so the app reported the stream unreachable.
+2. **The frame watchdog read a timestamp only written on the first frame.** Every healthy stream
+   therefore looked stalled five seconds in.
+3. **Clearing the player's `hasVideoFrames` without re-arming the observer** latched it false for
+   the life of the player, because the observer only reports the *first* frame after a reset. A
+   one-second wifi blip would have left "Reconnecting" over visibly moving video, then torn down a
+   working stream about ten seconds later - worse than the frozen-picture case the change was
+   meant to fix.
+
+The trap is that "has video started?" and "is video still flowing?" read like the same question and
+need opposite implementations. A latch answers the first and is actively wrong for the second; a
+continuously refreshed value answers both. Where the cost of refreshing continuously is the worry -
+here, an actor hop per frame at 30fps - the answer is a lock-guarded value the watcher *samples*,
+not a push.
+
+Two habits that would have caught all three:
+
+- **Ask what re-arms it.** Any flag cleared in more than one place needs a single function that
+  clears the flag and re-arms its source together, or the two drift apart. `forgetVideoFrames()`
+  exists for exactly this.
+- **Test the resumption, not just the arrival.** `VideoFrameObserver`'s tests assert that `reset()`
+  makes the next frame report again. Tests that only checked "the first frame is reported once"
+  passed happily through instance 3.
+
+Worth noting how each was found: the first by `inbound-rtp` statistics, the second and third by
+running the app and looking at it. None were visible to the unit tests that existed at the time, and
+the third was introduced *by* the fix for the second.
+
+## `JSONEncoder` key order is not stable either - don't string-compare encoded JSON in tests
+
+The P4 sibling of the `allKeys` finding, caught on the other side of the pipe: a test asserted the
+MSE handshake was sent by comparing the recorded frame to a freshly encoded one as *strings*, and
+failed intermittently because `JSONEncoder` emits object keys in whatever order the dictionary
+hashes to - two encodes of the same value need not produce the same bytes. Wire consumers don't
+care (JSON objects are unordered), so the fix is to compare *decoded* values, or pass
+`.sortedKeys` when byte-stable output genuinely matters.
+
+## Approachable Concurrency mismatches between app and test targets surface as conformance warnings
+
+The app target compiles with `SWIFT_APPROACHABLE_CONCURRENCY = YES`, which (among other things)
+infers `@Sendable` on `@MainActor` closure types. The test target does not, so a test double
+conforming to an app protocol with such closure properties (`FakeLivePlayer: LivePlayer`) warns
+that the "sendability of function types does not match requirement". Aligning the test target's
+settings is the clean fix in theory, but in practice it flipped the *default isolation* of every
+test helper too and produced a dozen new warnings in existing tests; the targeted fix is
+`@preconcurrency @testable import Frigate` in the file declaring the conformance. Worth revisiting
+if the test target ever migrates to the same settings wholesale.
+
+## Default-argument closures don't get the isolation checking you expect
+
+`init(makeChannel: MakeChannel = { client, src in try await client.liveSocket(...) })` compiled
+with "no 'async' operations occur within 'await' expression" warnings on calls that are
+definitely cross-actor awaits. Whatever the compiler is inferring for closure literals in default
+arguments, it is not what the same code means as a real function. Moving the default into a
+`private nonisolated static func` and using `makeChannel ?? Self.openSocket` restored ordinary,
+comprehensible isolation - and reads better anyway.
